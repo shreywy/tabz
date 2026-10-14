@@ -121,11 +121,21 @@ async function refreshLibrary() {
   ul.innerHTML = "";
   for (const it of items) {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="lib-name"></span><span class="lib-when mono"></span>`;
-    li.firstChild.textContent = it.name;
-    li.lastChild.textContent = when(it.when);
-    li.title = "Open PDF";
-    li.onclick = () => api().open_path(it.path);
+    li.innerHTML = `<span class="lib-main"><span class="lib-name"></span><span class="lib-notes"></span></span>
+      <span class="lib-when mono"></span><span class="lib-acts"></span>`;
+    $(".lib-name", li).textContent = it.name;
+    $(".lib-notes", li).textContent = it.notes;
+    $(".lib-when", li).textContent = when(it.when);
+    if (it.path) {
+      const b = document.createElement("button");
+      b.className = "link-btn";
+      b.textContent = "PDF";
+      b.title = "Open PDF";
+      b.onclick = (e) => { e.stopPropagation(); api().open_path(it.path); };
+      $(".lib-acts", li).appendChild(b);
+    }
+    li.title = it.song ? "Open in Play view" : "Open PDF";
+    li.onclick = () => (it.song ? openSong(it.song, "home") : api().open_path(it.path));
     ul.appendChild(li);
   }
   $("#library-empty").hidden = items.length > 0;
@@ -353,6 +363,9 @@ document.addEventListener("click", async (e) => {
   e.preventDefault();
   const act = a.dataset.action || a.dataset.go;
   if (act === "open-pdf") api().open_path(state.review.pdf);
+  if (act === "play-current" && state.review?.song) openSong(state.review.song, "review");
+  if (act === "play-back") leavePlay();
+  if (act === "fullscreen") toggleFull();
   if (act === "show-pdf") api().show_in_folder(state.review.pdf);
   if (act === "open-folder") api().show_in_folder(null);
   if (act === "new" || act === "home") {

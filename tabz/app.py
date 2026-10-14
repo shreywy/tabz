@@ -18,6 +18,7 @@ HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(
 UI = os.path.join(HERE, "tabz", "ui", "index.html")
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "tabz")
 CONFIG = os.path.join(CONFIG_DIR, "settings.json")
+LIBRARY = os.path.join(CONFIG_DIR, "library")      # one folder per song, for the Play view
 DEFAULTS = {
     "out_dir": os.path.join(os.path.expanduser("~"), "Documents", "tabz", "Completed"),
     "per_row": 2,
@@ -53,6 +54,7 @@ class Api:
         self.strips = []       # [(ink, color, sp, t0, t1)]
         self.removed = set()
         self.pdf_path = None
+        self.song_id = None
         self.busy = False
 
     # -- plumbing ---------------------------------------------------------
@@ -95,10 +97,22 @@ class Api:
         return self.settings
 
     def library(self):
-        files = glob.glob(os.path.join(self.settings["out_dir"], "*.pdf"))
-        files.sort(key=os.path.getmtime, reverse=True)
-        return [{"name": os.path.splitext(os.path.basename(f))[0], "path": f,
-                 "when": os.path.getmtime(f)} for f in files[:30]]
+        """Songs saved for Play, plus any other PDFs in the output folder."""
+        items, seen = [], set()
+        for mf in glob.glob(os.path.join(LIBRARY, "*", "manifest.json")):
+            m = _read_json(mf)
+            if not m:
+                continue
+            pdf = m.get("pdf") if m.get("pdf") and os.path.exists(m["pdf"]) else None
+            seen.add(os.path.normcase(pdf or ""))
+            items.append({"name": m["title"], "song": m["id"], "path": pdf, "notes": m.get("notes", ""),
+                          "when": os.path.getmtime(mf)})
+        for f in glob.glob(os.path.join(self.settings["out_dir"], "*.pdf")):
+            if os.path.normcase(f) not in seen:
+                items.append({"name": os.path.splitext(os.path.basename(f))[0], "song": None,
+                              "path": f, "notes": "", "when": os.path.getmtime(f)})
+        items.sort(key=lambda i: i["when"], reverse=True)
+        return items[:60]
 
     def open_path(self, path):
         if os.path.exists(path):
@@ -205,6 +219,7 @@ class Api:
         path = os.path.join(st["out_dir"], download.safe_filename(self.meta["title"]) + ".pdf")
         layout.write_pdf(path, rows, row_px, self.meta, paper=st["paper"])
         self.pdf_path = path
+        self.song_id = self._save_song([(a, c) for a, b, c, _, _ in keep], path)
         paper = layout.PAPER[st["paper"]]
         pt = (paper[0] - 2 * layout.MARGIN) / row_px
         self._emit("review", {
@@ -215,7 +230,58 @@ class Api:
             "pdf": path,
             "name": os.path.basename(path),
             "notes": self.meta.get("notes", ""),
+            "song": self.song_id,
         })
+
+    def _save_song(self, strips, pdf):
+        """Bars as PNGs + manifest.json, so the Play view can reflow them later."""
+        sid = self.meta.get("id") or download.safe_filename(self.meta["title"])
+        folder = os.path.join(LIBRARY, sid)
+        old = _read_json(os.path.join(folder, "manifest.json")) or {}
+        shutil.rmtree(folder, ignore_errors=True)
+        os.makedirs(folder)
+        segs, unit, sp = layout.segments(strips, self.region[2])
+        items = []
+        for n, sg in enumerate(segs):
+            name = f"{n:03d}.png"
+            cv2.imwrite(os.path.join(folder, name), sg.pop("img"))
+            items.append({"file": name, **sg})
+        manifest = {
+            "id": sid, "title": self.meta["title"], "url": self.meta["url"],
+            "channel": self.meta.get("channel", ""), "duration": self.meta.get("duration", 0),
+            "notes": self.meta.get("notes", ""), "pdf": pdf, "unit": unit, "sp": sp,
+            "created": old.get("created", time.time()), "bpm": old.get("bpm"),
+            "segments": items,
+        }
+        with open(os.path.join(folder, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        return sid
+
+    # -- play view ---------------------------------------------------------
+    def load_song(self, sid):
+        folder = os.path.join(LIBRARY, os.path.basename(sid))
+        m = _read_json(os.path.join(folder, "manifest.json"))
+        if not m:
+            return None
+        for sg in m["segments"]:
+            with open(os.path.join(folder, sg["file"]), "rb") as f:
+                sg["src"] = "data:image/png;base64," + base64.b64encode(f.read()).decode()
+        return m
+
+    def set_song(self, sid, changes):
+        path = os.path.join(LIBRARY, os.path.basename(sid), "manifest.json")
+        m = _read_json(path)
+        if m:
+            m.update({k: v for k, v in changes.items() if k in ("bpm", "beats")})
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(m, f)
+
+    def delete_song(self, sid):
+        """Remove a song from the library. The PDF in the output folder is left alone."""
+        shutil.rmtree(os.path.join(LIBRARY, os.path.basename(sid)), ignore_errors=True)
+
+    def toggle_fullscreen(self):
+        self.window.toggle_fullscreen()
 
     def _strip_cards(self):
         cards = []
@@ -234,6 +300,14 @@ class Api:
 
     def cleanup(self):
         self._drop_video()
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 def _friendly(e):

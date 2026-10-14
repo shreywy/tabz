@@ -92,6 +92,50 @@
     </aside>
   </section>
 
+  <!-- play: reflowing tab + metronome -->
+  <section class="screen play" data-screen="play">
+    <div class="play-bar">
+      <button class="icon-btn" data-action="play-back" title="Back (Esc)" aria-label="Back">
+        <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="play-title"><b id="play-title"></b><span id="play-notes"></span></div>
+
+      <div class="ctl" title="Screens of tab per line (keys 1-4)">
+        <span class="group-label">Per line</span>
+        <div class="seg" id="per-line">
+          <button data-n="1">1</button><button data-n="2">2</button><button data-n="3">3</button><button data-n="4">4</button>
+        </div>
+      </div>
+      <div class="ctl" title="Size (+ and - keys)">
+        <span class="group-label">Size</span>
+        <input type="range" id="zoom" min="0" max="1000" value="500" aria-label="Size">
+      </div>
+
+      <div class="ctl metro">
+        <span class="group-label">Click</span>
+        <div class="beats" id="beat-dots" aria-hidden="true"></div>
+        <div class="bpm">
+          <button class="step-btn" data-bpm="-1" aria-label="Slower">−</button>
+          <input id="bpm" type="number" min="30" max="300" value="80" aria-label="Beats per minute">
+          <button class="step-btn" data-bpm="1" aria-label="Faster">+</button>
+        </div>
+        <select id="beats" aria-label="Beats per bar">
+          <option value="2">2/4</option><option value="3">3/4</option><option value="4" selected>4/4</option><option value="6">6/8</option>
+        </select>
+        <button class="btn ghost small" id="tap" title="Tap along to set the tempo (T)">Tap</button>
+        <button class="btn primary small" id="metro-go" title="Start or stop (Space)">Start</button>
+      </div>
+
+      <div class="seg" id="theme" title="Page colour">
+        <button data-theme="paper">Paper</button><button data-theme="dark">Dark</button>
+      </div>
+      <button class="icon-btn" data-action="fullscreen" title="Full screen (F)" aria-label="Full screen">
+        <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M3.5 7.5v-4h4M16.5 7.5v-4h-4M3.5 12.5v4h4M16.5 12.5v4h-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      </button>
+    </div>
+    <div class="sheet-view" id="sheet"></div>
+  </section>
+
   <!-- 04 review -->
   <section class="screen review" data-screen="review">
     <div class="pages" id="pages" aria-label="PDF preview"></div>
@@ -100,7 +144,8 @@
         <p class="kicker">Saved</p>
         <p class="saved-name" id="saved-name"></p>
         <div class="side-actions">
-          <button class="btn primary" data-action="open-pdf">Open PDF</button>
+          <button class="btn primary" data-action="play-current">Play</button>
+          <button class="btn ghost" data-action="open-pdf">Open PDF</button>
           <button class="btn ghost" data-action="show-pdf">Show in folder</button>
         </div>
       </div>
@@ -158,5 +203,6 @@
 </div>
 
 <script src="app.js"></script>
+<script src="play.js"></script>
 </body>
 </html>

@@ -186,6 +186,37 @@ def build_rows(strips, screen_w, per_row=2, keep_color=False):
     return [render_row(r, sp_ref, gap, keep_color) for r in rows], row_px
 
 
+def segments(strips, screen_w):
+    """Units for the Play view, which reflows them to any width.
+
+    Scrolled strips are cut into single bars so lines can break anywhere a bar ends.
+    Swapped pages stay whole. Everything is scaled to one string spacing.
+    Returns ([{"img", "staff_y", "group", "kind"}], unit_px, sp_ref).
+    """
+    infos = [StripInfo(img, None, sp) for img, sp in strips]
+    sp_ref = float(np.median([i.sp for i in infos]))
+    out = []
+    for g, i in enumerate(infos):
+        s = sp_ref / i.sp
+        scrolled = (i.x_end - i.x_start) > screen_w * 1.3
+        bounds = [i.x_start, i.x_end]
+        if scrolled:
+            cuts = [c for c in i.cuts[0] if i.x_start < c < i.x_end]
+            bounds = [i.x_start]
+            for c in cuts + [i.x_end]:
+                if c - bounds[-1] < screen_w * 0.12 and c != i.x_end:
+                    continue                      # too thin to stand alone: merge forward
+                bounds.append(c)
+        for x0, x1 in zip(bounds, bounds[1:]):
+            src = (255 - i.img[i.top:i.bottom, x0:x1] * (255 - INK)).astype(np.uint8)
+            im = cv2.resize(src, None, fx=s, fy=s, interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
+            out.append({"img": im, "staff_y": round((i.y_first - i.top) * s, 1),
+                        "staff_h": round((i.y_last - i.y_first) * s, 1),
+                        "group": g, "kind": "bar" if scrolled else "page"})
+    unit = max(min(i.x_end - i.x_start, screen_w) * sp_ref / i.sp for i in infos)
+    return out, unit, sp_ref
+
+
 def write_pdf(path, rows, row_px, meta, paper="a4"):
     """rows: images from build_rows. meta: title, url, channel, duration."""
     W, H = PAPER[paper]
