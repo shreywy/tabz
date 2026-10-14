@@ -78,23 +78,111 @@ def _key_name(s):
 
 # ---- title -> song / artist ----------------------------------------------------
 
-def parse_title(title, channel=""):
-    """Best guess at (song, artist) from a video title like
-    "blue - yung kai | Fingerstyle Guitar | TAB + Chords"."""
+def _tidy(p):
+    p = NOISE.sub(" ", p)
+    # brackets left holding a single word ("( in )", "(Simple )") were all noise
+    p = re.sub(r"\(\s*([^()\s]*)\s*\)", lambda m: "" if len(m.group(1)) < 12 and " " not in m.group(1).strip() else m.group(0), p)
+    return re.sub(r"\s{2,}", " ", p).strip(" -–—:,.")
+
+
+def title_parts(title, channel=""):
+    """The meaningful pieces of a video title, noise and the uploader's name removed."""
     chan = re.sub(r"\W+", "", channel or "").lower()
     parts = []
     for section in re.split(r"\s*[|｜/【】\[\]]\s*", title):
         for p in re.split(r"\s+[-–—]\s+", section):
-            p = NOISE.sub(" ", p)
-            p = re.sub(r"\(\s*\)|\s{2,}", " ", p).strip(" -–—:,.")
-            if not p or re.sub(r"\W+", "", p).lower() in ("", chan):
-                continue
-            parts.append(p)
+            p = _tidy(p)
+            if p and re.sub(r"\W+", "", p).lower() not in ("", chan):
+                parts.append(p)
+    return parts
+
+
+def parse_title(title, channel=""):
+    """Best guess at (song, artist) from a video title like
+    "blue - yung kai | Fingerstyle Guitar | TAB + Chords". Order is a guess; lookup()
+    settles it when it can."""
+    parts = title_parts(title, channel)
     if not parts:
         return title.strip(), ""
     if len(parts) == 1:
-        return parts[0], ""
+        m = re.match(r"(.+?)\s*\(([^()]+)\)$", parts[0])      # "Love Story (Taylor Swift)"
+        return (m.group(1), m.group(2)) if m else (parts[0], "")
     return " - ".join(parts[:-1]), parts[-1]
+
+
+def _fold(s):
+    """Lowercase without accents, so "Für Elise" matches "Fur Elise"."""
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", s or "") if not unicodedata.combining(c)).lower()
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]+", "", _fold(s))
+
+
+def lookup(title, channel=""):
+    """Song, artist, album, year, genre and cover art from Apple's public iTunes search.
+    Tries each way round, since titles put the artist first or last. None if nothing
+    matches or there's no connection."""
+    import json
+    import urllib.parse
+    import urllib.request
+    parts = title_parts(title, channel)
+    song, artist = parse_title(title, channel)
+    pairs = [(song, artist), (artist, song)]
+    for p in parts:                        # "Kimi no Na wa - Kataware Doki - RADWIMPS"
+        for q in parts:
+            if p != q:
+                pairs.append((p, q))
+    pairs = [(a, b) for a, b in pairs if a and b]
+    if not pairs:
+        return None
+    try:
+        q = urllib.parse.urlencode({"term": f"{song} {artist}"[:120], "entity": "song", "limit": 25})
+        with urllib.request.urlopen("https://itunes.apple.com/search?" + q, timeout=5) as r:
+            results = json.load(r).get("results", [])
+    except Exception:
+        return None
+    def words(s):
+        return set(re.findall(r"[a-z0-9]+", _fold(s)))
+
+    best, best_score = None, 0
+    for s, a in pairs:
+        ns, na = _norm(re.sub(r"\(.*?\)", "", s)), _norm(a)
+        if not ns or not na:
+            continue
+        for x in results:
+            name = x.get("trackName") or ""
+            t, ar = _norm(re.sub(r"\(.*?\)", "", name)), _norm(x.get("artistName"))
+            # artist: exact beats "Ludwig van Beethoven" beats "Beethoven's Wig"
+            if ar == na:
+                score = 3
+            elif words(a) <= words(x.get("artistName")):
+                score = 2
+            else:
+                continue
+            if t == ns:
+                score += 3
+            elif t.startswith(ns) or ns.startswith(t):
+                score += 1
+            else:
+                continue
+            # the studio original over live takes, covers and special versions
+            extra = name.lower()
+            if re.search(r"\b(live|karaoke|instrumental|cover|tribute|remix|acoustic|demo)\b", extra):
+                score -= 2
+            if "(" in name and "(" not in s:
+                score -= 1
+            if score > best_score:
+                best, best_score = x, score
+    if best_score < 4:                   # a weak match is worse than the title's own guess
+        return None
+    art = best.get("artworkUrl100") or ""
+    return {"song": best.get("trackName"), "artist": best.get("artistName"),
+            "album": re.sub(r"\s*-\s*(Single|EP)$", "", best.get("collectionName") or "") or None,
+            "year": (best.get("releaseDate") or "")[:4] or None,
+            "genre": best.get("primaryGenreName"),
+            "artwork": art.replace("100x100bb", "600x600bb") or None}
 
 
 # ---- OCR ---------------------------------------------------------------------------
@@ -137,8 +225,8 @@ def _labels(band, sp):
     out = []
     for i in range(1, n):
         x, y, w, h, _ = stats[i]
-        if h < sp * 0.3 or w > sp * 8:
-            continue
+        if h < sp * 0.3 or h > sp * 2.5 or w > sp * 8:
+            continue                     # chord names are text-sized; stems and beams aren't
         crop = m[y:y + h, x:x + w]
         if crop.sum() >= 6:
             out.append((x, crop))
@@ -151,7 +239,8 @@ def _context_line(crop):
     letter like "A", but reads it fine as the second word of "Chord A"."""
     H, pad, gap = 40, 30, 28
     s = H / crop.shape[0]
-    c = cv2.resize(crop.astype(np.uint8) * 255, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC) > 127
+    size = (max(1, round(crop.shape[1] * s)), H)
+    c = cv2.resize(crop.astype(np.uint8) * 255, size, interpolation=cv2.INTER_CUBIC) > 127
     (tw, _), _ = cv2.getTextSize("Chord", cv2.FONT_HERSHEY_DUPLEX, 1.3, 2)
     img = np.full((H + 2 * pad, pad + tw + gap + c.shape[1] + pad), 255, np.uint8)
     cv2.putText(img, "Chord", (pad, pad + H), cv2.FONT_HERSHEY_DUPLEX, 1.3, 0, 2, cv2.LINE_AA)
@@ -269,10 +358,13 @@ def sounding_key(key, capo):
 def song_info(video_path, title, channel="", description=""):
     """Everything we can get before scanning: song, artist, capo, tuning, key, tempo."""
     song, artist = parse_title(title, channel)
+    found = lookup(title, channel) or {}
     screen = facts_from_text(_frame_lines(video_path))
     desc = facts_from_text((description or "").splitlines())
     facts = {k: screen[k] if screen[k] is not None else desc[k] for k in screen}
-    return {"song": song, "artist": artist, **facts, "chords": [], "key_guessed": False}
+    return {"song": found.get("song") or song, "artist": found.get("artist") or artist,
+            "album": found.get("album"), "year": found.get("year"), "genre": found.get("genre"),
+            "artwork": found.get("artwork"), **facts, "chords": [], "key_guessed": False}
 
 
 def add_strip_info(info, bands, sp):
@@ -281,6 +373,9 @@ def add_strip_info(info, bands, sp):
     # drop one-off reads when the song clearly has a vocabulary (likely OCR noise)
     total = sum(n for _, n in chords)
     info["chords"] = [c for c, n in chords if n > 1 or total < 12]
+    if len(info["chords"]) < 2:          # one stray read isn't a chord chart
+        info["chords"] = []
+        chords = []
     if info.get("tempo") is None and tempo:
         info["tempo"] = tempo
     if not info.get("key"):
@@ -319,6 +414,9 @@ if __name__ == "__main__":
     assert p("Cupid (Twin Version) - FIFTY FIFTY | Fingerstyle Guitar | TAB + Chords + Lyrics") == ("Cupid (Twin Version)", "FIFTY FIFTY")
     assert p("pasilyo fingerstyle tabs - abz collado | sunkissed lola", "Abz Collado") == ("pasilyo", "sunkissed lola")
     assert p("Kimi no Na wa (Your name) - Kataware Doki - RADWIMPS - Fingerstyle Guitar Cover | TAB Tutorial")[1] == "RADWIMPS"
+    assert p("Love Story (Taylor Swift) - Easy Beginner Ukulele Tab With Play Along") == ("Love Story", "Taylor Swift")
+    assert p("Fur Elise - Beethoven (Simple Guitar Tab)", "Simple Guitar Tabs") == ("Fur Elise", "Beethoven")
+    assert p("Arctic Monkeys - Do I Wanna Know (bass cover with tabs in video)") == ("Arctic Monkeys", "Do I Wanna Know")
 
     g = guess_key
     assert g([("D", 24), ("Bm7", 24), ("A", 17), ("A6", 6), ("G", 5)]) == "D"

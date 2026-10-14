@@ -21,6 +21,23 @@ CASES = [
     ("OgjldkwoaDQ", (1, 2), True),
     # dark custom skin, notes change colour when played, swaps, end screen
     ("WHZzYJ1-aM0", (18, 22), False),
+    # --- other channels, picked for looks not in the set above ---
+    # bass: notation + 4-string tab on yellow paper, faint lines, swaps
+    ("Rm6Qm45Q-OI", (12, 16), False),
+    # bass: notation + tab, Guitar Pro, crossfades between pages, repetitive riff
+    ("l54Hs_AWn4k", (1, 2), True),
+    # long thin strip with rhythm stems, continuous scroll
+    ("WeIWkV2X2Cg", (1, 2), True),
+    # dark panel, orange note highlight, swaps, end screen
+    ("9Ikb8QhVev0", (6, 8), False),
+    # ukulele: notation + 4-string tab at the top, swaps
+    ("Fqf2xNEfbz0", (9, 11), False),
+    # notation + tab with subtitles just above, swaps
+    ("ap519CPKyys", (32, 37), False),
+    # Guitar Pro style from another channel, scrolls with highlight
+    ("Ou_Jv_hJpjU", (1, 2), True),
+    # metal tab, scrolling, used to 403 on download
+    ("29dm1hKIKUc", (1, 2), True),
 ]
 
 

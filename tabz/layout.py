@@ -57,17 +57,22 @@ class StripInfo:
 
     def _content_rows(self):
         """Ink rows above/below the staff (chord names, bar numbers, rhythm marks)."""
+        # Walk outward from the staff and keep anything connected to it by gaps smaller
+        # than a few string-gaps: chord names, bar numbers, a notation staff above,
+        # rhythm stems below. A bigger empty gap means unrelated stuff, so stop there.
         rows = (self.img > 0.5).sum(axis=1) > 2
         top = int(self.y_first)
-        lim = max(0, int(self.y_first - 4.2 * self.sp))
-        for y in range(int(self.y_first), lim - 1, -1):
+        for y in range(int(self.y_first), -1, -1):
             if rows[y]:
                 top = y
+            elif top - y > 3 * self.sp:
+                break
         bot = int(self.y_last)
-        lim = min(len(rows) - 1, int(self.y_last + 2.6 * self.sp))
-        for y in range(int(self.y_last), lim + 1):
+        for y in range(int(self.y_last), len(rows)):
             if rows[y]:
                 bot = y
+            elif y - bot > 2 * self.sp:
+                break
         pad = int(self.sp * 0.3)
         return max(0, top - pad), min(len(rows), bot + pad + 1)
 
@@ -227,7 +232,7 @@ def segments(strips, screen_w):
     return out, unit, sp_ref
 
 
-def write_pdf(path, rows, row_px, meta, paper="a4"):
+def write_pdf(path, rows, row_px, meta, paper="a4", art=None):
     """rows: images from build_rows. meta: title, url, channel, duration."""
     W, H = PAPER[paper]
     margin = MARGIN
@@ -249,7 +254,7 @@ def write_pdf(path, rows, row_px, meta, paper="a4"):
         c.drawString(margin, 22, foot[:110])
         c.drawRightString(W - margin, 22, str(n))
 
-    y = draw_header(c, meta, margin, H - margin, content_w)
+    y = draw_header(c, meta, margin, H - margin, content_w, art)
 
     page = 1
     for im in rows:
@@ -287,13 +292,28 @@ def header_cells(info):
     return cells
 
 
-def draw_header(c, meta, x, top, width):
+def artist_line(info):
+    """"yung kai" plus whatever else we know: "Arctic Monkeys · AM · 2013 · Alternative"."""
+    return "   ·   ".join(b for b in (info.get("artist"), info.get("album"), info.get("year"), info.get("genre")) if b)
+
+
+ART = 62    # cover art size in the header, points
+
+
+def draw_header(c, meta, x, top, width, art=None):
     """Song, artist, info row, chords, source line. With c=None nothing is drawn and
     only the height is worked out (the review preview uses that to paginate)."""
     info = meta.get("info") or {}
     song = info.get("song") or meta["title"]
-    artist = info.get("artist") or ""
+    artist = artist_line(info)
     y = top
+    text_w = width - (ART + 16 if art else 0)
+    if art and c is not None:
+        try:
+            import io
+            c.drawImage(ImageReader(io.BytesIO(art)), x + width - ART, top - ART, ART, ART)
+        except Exception:
+            pass
 
     def text(font, size, gray, s, tx, ty, color=None):
         if c is None:
@@ -305,12 +325,14 @@ def draw_header(c, meta, x, top, width):
             c.setFillGray(gray)
         c.drawString(tx, ty, s)
 
-    for line in _wrap(song, "Plex-SemiBold", 21, width)[:2]:
+    for line in _wrap(song, "Plex-SemiBold", 21, text_w)[:2]:
         y -= 24
         text("Plex-SemiBold", 21, 0.08, line, x, y)
     if artist:
         y -= 17
         text("Plex", 12, 0.38, artist, x, y)
+    if art:
+        y = min(y, top - ART + 4)       # keep the info row below the cover
 
     cells = header_cells(info)
     if cells:

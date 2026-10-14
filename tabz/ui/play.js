@@ -46,6 +46,9 @@ async function openSong(id, from) {
 function renderInfo() {
   const m = play.song, i = m.info || {};
   const rows = [];
+  if (i.album) rows.push(["Album", i.album]);
+  if (i.year) rows.push(["Year", i.year]);
+  if (i.genre) rows.push(["Genre", i.genre]);
   if (i.capo != null) rows.push(["Capo", i.capo === 0 ? "None" : `Fret ${i.capo}`]);
   if (i.tuning) rows.push(["Tuning", i.tuning]);
   if (i.key) rows.push([i.key_guessed ? "Key (guess)" : "Key", i.key]);
@@ -53,6 +56,7 @@ function renderInfo() {
   rows.push(["Length", clock(m.duration)]);
   if (m.channel) rows.push(["Tab from", m.channel]);
   $("#info-body").innerHTML = `
+    ${m.art ? `<img class="cover" src="${m.art}" alt="">` : ""}
     <div><h2>${esc(i.song || m.title)}</h2>${i.artist ? `<p class="by">${esc(i.artist)}</p>` : ""}</div>
     <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
     ${(i.chords || []).length ? `<div class="group"><span class="group-label">Chords</span><div class="chips">${i.chords.map((c) => `<span class="chip">${esc(c)}</span>`).join("")}</div></div>` : ""}

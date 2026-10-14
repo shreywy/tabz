@@ -126,10 +126,37 @@ def vote_staff(path, box=None, samples=24):
 
     def near(o, s):
         return abs(o[0] - s[0]) < s[2] / 2 and abs(o[2] - s[2]) < s[2] * 0.15
-    best = max(found, key=lambda s: sum(near(o, s) for o in found))
-    same = [o for o in found if near(o, best)]
-    med = lambda i: float(np.median([o[i] for o in same]))
-    return med(0), med(1), med(2), int(round(med(3))), int(med(4)), int(med(5))
+
+    # group detections of the same staff across frames
+    clusters = []
+    for s in sorted(found, key=lambda s: -sum(near(o, s) for o in found)):
+        if any(near(s, c[0]) for c in clusters):
+            continue
+        same = [o for o in found if near(o, s)]
+        med = lambda i: float(np.median([o[i] for o in same]))
+        clusters.append(((med(0), med(1), med(2), int(round(med(3))), int(med(4)), int(med(5))), len(same)))
+
+    # The anchor is the most persistent staff, but a 5-line staff is usually standard
+    # notation sitting above the tab, so a close-enough tab staff wins over it.
+    top = clusters[0][1]
+    tabby = [c for c in clusters if c[0][3] != 5 and c[1] >= top * 0.6]
+    anchor = tabby[0] if tabby else clusters[0]
+    (y0, y1, sp, n, x0, x1), count = anchor
+
+    # Staves drawn right above or below as part of the same system (notation over tab,
+    # or two tab lines at once) come along, so the box never cuts a score in half.
+    grew = True
+    while grew:
+        grew = False
+        for (cy0, cy1, csp, _, cx0, cx1), c in clusters:
+            overlap = min(x1, cx1) - max(x0, cx0)
+            if c < count * 0.5 or overlap < 0.6 * min(x1 - x0, cx1 - cx0) or (cy0 >= y0 and cy1 <= y1):
+                continue
+            if 0 < y0 - cy1 <= 5 * sp or 0 < cy0 - y1 <= 5 * sp:
+                y0, y1 = min(y0, cy0), max(y1, cy1)
+                x0, x1 = min(x0, cx0), max(x1, cx1)
+                grew = True
+    return y0, y1, sp, n, x0, x1
 
 
 def guess_region(path):
@@ -207,7 +234,7 @@ def has_staff(ink_img, sp):
     bigger or lower.
     """
     m = cv2.morphologyEx(ink_img, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp * 0.9), 1)))
-    groups = staff_groups(row_peaks(m.mean(axis=1), 0.45, sp * 0.6))
+    groups = staff_groups(row_peaks(m.mean(axis=1), 0.3, sp * 0.6))
     return any(abs(g[2] - sp) < sp * 0.2 for g in groups)
 
 
@@ -252,9 +279,23 @@ class Strip:
         self.color[:, self.x:self.x + w] = crop
         self.t1 = t
 
+    def merge(self, other, offset):
+        """Lay another strip onto this one starting at column `offset`."""
+        h = self.sum.shape[0]
+        need = offset + other.sum.shape[1] - self.sum.shape[1]
+        if need > 0:
+            pad = np.zeros((h, need), np.float32)
+            self.sum = np.hstack([self.sum, pad]); self.cnt = np.hstack([self.cnt, pad])
+            self.color = np.hstack([self.color, np.full((h, need, 3), 255, np.uint8)])
+        w = other.sum.shape[1]
+        self.sum[:, offset:offset + w] += other.sum
+        self.cnt[:, offset:offset + w] += other.cnt
+        self.color[:, offset:offset + w] = other.color
+        self.t1 = other.t1
+
     def image(self):
         avg = self.sum / np.maximum(self.cnt, 1)
-        return np.clip((avg - 0.3) / 0.35, 0, 1)
+        return np.clip((avg - 0.22) / 0.3, 0, 1)
 
 
 def match_shift(prev, cur, max_dy=4):
@@ -264,21 +305,35 @@ def match_shift(prev, cur, max_dy=4):
     up to ~3/4 of the strip (a whole page of bars sliding in) still overlaps.
     """
     h, w = cur.shape
-    best = (None, 0.0)
+    cands = {}
     for a, b in ((0.12, 0.5), (0.03, 0.22)):
         a, b = int(w * a), int(w * b)
         tpl = cur[max_dy:h - max_dy, a:b]
         if tpl.sum() < 20:              # nothing distinctive to lock on to
             continue
-        res = cv2.matchTemplate(prev, tpl, cv2.TM_CCOEFF_NORMED)
-        _, score, _, (px, _) = cv2.minMaxLoc(res)
-        if score > best[1]:
-            best = (px - a, float(score))
-    if best[0] is not None:
-        # the window can lock on to things that never change (string labels, a logo);
-        # make sure the rest of the overlap agrees too
-        best = (best[0], min(best[1], overlap_score(prev, cur, best[0])))
-    return best
+        prof = cv2.matchTemplate(prev, tpl, cv2.TM_CCOEFF_NORMED).max(axis=0)
+        # Repeating riffs give several near-equal peaks, and the highest isn't always
+        # the right one, so keep the top few and let the full overlap decide.
+        found = 0
+        for px in np.argsort(prof)[::-1]:
+            if prof[px] < 0.3 or found >= 4:
+                break
+            dx = int(px) - a
+            if all(abs(dx - c) >= 6 for c in cands):   # skip the shoulders of a peak already taken
+                cands[dx] = float(prof[px])
+                found += 1
+    if not cands:
+        return None, 0.0
+    # The window can also lock on to things that never change (string labels, a logo),
+    # so the rest of the overlap has to agree too. "Didn't move" is always in the running
+    # and wins near-ties: with a repeating riff, a shift of exactly one riff looks almost
+    # as good as staying put, but after a real scroll staying put scores far lower.
+    cands.setdefault(0, 1.0)
+    scored = {dx: min(s, overlap_score(prev, cur, dx)) for dx, s in cands.items()}
+    top = max(scored.values())
+    near = [dx for dx, v in scored.items() if v >= top - 0.06]
+    dx = min(near, key=abs)
+    return dx, scored[dx]
 
 
 def overlap_score(prev, cur, dx):
@@ -338,15 +393,24 @@ def scan(path, region, fps=4.0, on_progress=None, on_strip=None):
 
         if cur is not None:
             dx, score = match_shift(ref, small)
-            if dx is not None and ((abs(dx) <= 2 and score >= SAME) or (dx > 2 and score >= SCROLL)):
-                dx = 0 if dx <= 2 else dx * 2      # back to full resolution
-                cur.add(img, crop, dx, t)
+            # unchanged, or a small step of a smooth scroll: take it straight away
+            if dx is not None and ((abs(dx) <= 2 and score >= SAME) or
+                                   (2 < dx < small.shape[1] * 0.25 and score >= SCROLL)):
+                cur.add(img, crop, 0 if dx <= 2 else dx * 2, t)   # back to full resolution
                 ref, pending = small, None
                 continue
-        # no match: wait for the picture to settle before starting a new strip
+        # Anything bigger (a page jump, a swap, a crossfade) waits until the picture
+        # settles. Half-faded frames can each look like "moved by a page", and adding
+        # every one of them would repeat bars.
         if pending is not None:
             dx, score = match_shift(pending[1], small)
             if dx is not None and score >= SAME and abs(dx) <= 2:
+                if cur is not None:
+                    jump, js = match_shift(ref, small)          # settled view vs last clean one
+                    if jump is not None and jump > 2 and js >= SCROLL:
+                        cur.add(img, crop, jump * 2, t)
+                        ref, pending = small, None
+                        continue
                 cur = Strip(pending[0], pending[3], pending[2])
                 cur.add(img, crop, 0, t)
                 strips.append(cur)
@@ -356,6 +420,34 @@ def scan(path, region, fps=4.0, on_progress=None, on_strip=None):
                 continue
         pending = (img, small, t, crop)
     cap.release()
+    strips = rejoin(strips, sp, w)
     if on_progress:
         on_progress(1.0)
     return strips, sp
+
+
+def rejoin(strips, sp, screen_w):
+    """Merge a strip into the one before it when it starts partway through it.
+
+    Happens when a scrolling view jumps and the settled picture didn't line up with the
+    last clean frame (fades, highlight boxes). Only partial overlaps merge: two identical
+    pages in a row are a real repeat and stay separate.
+    """
+    out = []
+    for s in strips:
+        if out:
+            a = out[-1]
+            tail = a.image()[:, -screen_w:]
+            head = s.image()[:, :screen_w]
+            if tail.shape[1] == screen_w and head.shape[1] == screen_w:
+                small = lambda im: cv2.resize(notes_only(im, sp), None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+                dx, score = match_shift(small(tail), small(head))
+                # identical pages back to back are a repeat on swap-style videos, but at
+                # the seam of a scrolled strip they're the same screen captured twice
+                scrolled = max(a.sum.shape[1], s.sum.shape[1]) > screen_w * 1.3
+                lo = -1 if scrolled else screen_w * 0.05
+                if dx is not None and lo < dx * 2 < screen_w * 0.9 and score >= 0.75:
+                    a.merge(s, a.sum.shape[1] - screen_w + dx * 2)
+                    continue
+        out.append(s)
+    return out

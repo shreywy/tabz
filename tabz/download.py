@@ -40,9 +40,30 @@ def download(url, on_progress=None, dest=TEMP_DIR):
         # Smaller ranged requests: YouTube intermittently 403s long single requests.
         "http_chunk_size": 10 * 1024 * 1024,
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = ydl.prepare_filename(info)
+    # YouTube sometimes refuses a download partway (HTTP 403) for one player client and
+    # not another, so fall through a few before giving up.
+    last = None
+    for client in (None, ["web_safari"], ["tv"], ["mweb"]):
+        o = dict(opts)
+        if client:
+            o["extractor_args"] = {"youtube": {"player_client": client}}
+        try:
+            with yt_dlp.YoutubeDL(o) as ydl:
+                info = ydl.extract_info(url, download=True)
+                path = ydl.prepare_filename(info)
+            break
+        except yt_dlp.utils.DownloadError as e:
+            last = e
+            if "403" not in str(e) and "Forbidden" not in str(e):
+                raise
+            for f in os.listdir(dest):          # drop the half-written file before retrying
+                if f.endswith((".part", ".ytdl")):
+                    try:
+                        os.remove(os.path.join(dest, f))
+                    except OSError:
+                        pass
+    else:
+        raise last
     return path, {
         "id": info.get("id"),
         "title": info.get("title") or "Untitled",

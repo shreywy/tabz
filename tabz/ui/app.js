@@ -227,8 +227,11 @@ function cardHtml(it) {
     <li class="card" data-song="${esc(it.song || "")}" data-path="${esc(it.path || "")}">
       ${thumb}
       <div class="body">
-        <span class="song">${esc(song)}</span>
-        ${i.artist ? `<span class="artist">${esc(i.artist)}</span>` : ""}
+        <div class="title-row">
+          ${it.art ? `<img class="art" src="${it.art}" alt="">` : ""}
+          <div><span class="song">${esc(song)}</span>
+          ${i.artist ? `<span class="artist">${esc([i.artist, i.year].filter(Boolean).join(" · "))}</span>` : ""}</div>
+        </div>
         <div class="chips">${infoChips(i, { max: 8 })}</div>
         <div class="foot">
           <span>${esc([it.channel, when(it.when)].filter(Boolean).join(" · "))}</span>
@@ -253,7 +256,7 @@ function renderLibrary() {
   let items = state.library.filter((it) => {
     if (!q) return true;
     const i = it.info || {};
-    const hay = [it.name, i.song, i.artist, it.channel, i.key, i.tuning, ...(i.chords || []),
+    const hay = [it.name, i.song, i.artist, i.album, i.year, i.genre, it.channel, i.key, i.tuning, ...(i.chords || []),
       i.capo != null ? `capo ${i.capo}` : "", i.tempo ? `${i.tempo} bpm` : ""].join(" ").toLowerCase();
     return q.split(/\s+/).every((w) => hay.includes(w));
   });
@@ -424,10 +427,19 @@ function renderReview() {
 
   // header (draw_header in layout.py)
   const song = info.song || meta.title || "";
-  const songLines = fitText(song, "600 21px Plex", cw) ? 1 : 2;
-  el("p-song", esc(song), y + 3, 21, { whiteSpace: songLines > 1 ? "normal" : "nowrap", lineHeight: px(24) });
+  const art = r.header?.art, ART = 62, textW = cw - (art ? ART + 16 : 0);
+  if (art) {
+    const im = document.createElement("img");
+    im.src = art;
+    Object.assign(im.style, { left: px(M + cw - ART), top: px(M), width: px(ART), height: px(ART), borderRadius: "2px" });
+    page.appendChild(im);
+  }
+  const songLines = fitText(song, "600 21px Plex", textW) ? 1 : 2;
+  el("p-song", esc(song), y + 3, 21, { whiteSpace: songLines > 1 ? "normal" : "nowrap", lineHeight: px(24), maxWidth: px(textW) });
   y += 24 * songLines;
-  if (info.artist) { el("p-artist", esc(info.artist), y + 4, 12); y += 17; }
+  const sub = r.header?.sub || info.artist;
+  if (sub) { el("p-artist", esc(sub).replace(/ {3}/g, "&ensp;"), y + 4, 12, { whiteSpace: "nowrap" }); y += 17; }
+  if (art) y = Math.max(y, M + ART - 4);
   const cells = r.header?.cells || [];
   if (cells.length) {
     el("p-cells", cells.map(([l, v]) => `<div class="p-cell" style="margin-right:${24 * k}px"><small style="font-size:${6.8 * k}px">${esc(l)}</small><span style="font-size:${10.5 * k}px">${esc(v)}</span></div>`).join(""), y + 6, 10.5);

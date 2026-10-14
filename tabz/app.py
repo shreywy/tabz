@@ -74,6 +74,7 @@ class Api:
         self.removed = set()
         self.pdf_path = None
         self.song_id = None
+        self.art = None          # cover art bytes, when the song was found online
         self.busy = False
 
     # -- plumbing ---------------------------------------------------------
@@ -129,7 +130,8 @@ class Api:
                           "info": m.get("info") or {}, "channel": m.get("channel", ""),
                           "duration": m.get("duration", 0), "url": m.get("url"),
                           "bars": len(m.get("segments", [])), "created": m.get("created", 0),
-                          "thumb": _file_url(thumb), "when": os.path.getmtime(mf)})
+                          "thumb": _file_url(thumb), "when": os.path.getmtime(mf),
+                          "art": _file_url(os.path.join(os.path.dirname(mf), "art.jpg"), "jpeg")})
         for f in glob.glob(os.path.join(self.settings["out_dir"], "*.pdf")):
             if os.path.normcase(f) not in seen:
                 items.append({"name": os.path.splitext(os.path.basename(f))[0], "song": None,
@@ -183,6 +185,8 @@ class Api:
         self.meta["info"] = info.song_info(self.video, self.meta["title"], self.meta.get("channel", ""),
                                            self.meta.pop("description", ""))
         self.meta["notes"] = info.summary(self.meta["info"])
+        self.art = _fetch(self.meta["info"].get("artwork"))
+        self.meta["art"] = _bytes_url(self.art, "jpeg")
         self._emit("meta", self.meta)
         region = vision.guess_region(self.video)
         cap = cv2.VideoCapture(self.video)
@@ -257,13 +261,13 @@ class Api:
                                          per_row=int(st["per_row"]), keep_color=bool(st["keep_color"]))
         os.makedirs(st["out_dir"], exist_ok=True)
         path = os.path.join(st["out_dir"], download.safe_filename(self.meta["title"]) + ".pdf")
-        layout.write_pdf(path, rows, row_px, self.meta, paper=st["paper"])
+        layout.write_pdf(path, rows, row_px, self.meta, paper=st["paper"], art=self.art)
         self.pdf_path = path
         self.song_id = self._save_song([(a, c) for a, b, c, _, _ in keep], path)
         paper = layout.PAPER[st["paper"]]
         pt = (paper[0] - 2 * layout.MARGIN) / row_px
         top = paper[1] - layout.MARGIN
-        header_h = top - layout.draw_header(None, self.meta, layout.MARGIN, top, paper[0] - 2 * layout.MARGIN)
+        header_h = top - layout.draw_header(None, self.meta, layout.MARGIN, top, paper[0] - 2 * layout.MARGIN, self.art)
         self._emit("review", {
             "rows": [{"src": data_url(r, 1400, ".png" if r.ndim == 2 else ".jpg"),
                       "w": r.shape[1] * pt, "h": r.shape[0] * pt} for r in rows],
@@ -273,7 +277,8 @@ class Api:
             "name": os.path.basename(path),
             "notes": self.meta.get("notes", ""),
             "info": self.meta["info"],
-            "header": {"h": header_h, "cells": layout.header_cells(self.meta["info"])},
+            "header": {"h": header_h, "cells": layout.header_cells(self.meta["info"]),
+                       "sub": layout.artist_line(self.meta["info"]), "art": self.meta.get("art")},
             "sounds": info.sounding_key(self.meta["info"].get("key"), self.meta["info"].get("capo")),
             "song": self.song_id,
         })
@@ -287,6 +292,9 @@ class Api:
         os.makedirs(folder)
         segs, unit, sp = layout.segments(strips, self.region[2])
         cv2.imwrite(os.path.join(folder, "thumb.png"), _thumb(segs, unit))
+        if self.art:
+            with open(os.path.join(folder, "art.jpg"), "wb") as f:
+                f.write(self.art)
         items = []
         for n, sg in enumerate(segs):
             name = f"{n:03d}.png"
@@ -312,6 +320,7 @@ class Api:
         for sg in m["segments"]:
             with open(os.path.join(folder, sg["file"]), "rb") as f:
                 sg["src"] = "data:image/png;base64," + base64.b64encode(f.read()).decode()
+        m["art"] = _file_url(os.path.join(folder, "art.jpg"), "jpeg")
         return m
 
     def set_song(self, sid, changes):
@@ -368,11 +377,27 @@ def _thumb(segs, unit, width=640):
     return cv2.resize(out, (width, max(1, int(out.shape[0] * width / out.shape[1]))), interpolation=cv2.INTER_AREA)
 
 
-def _file_url(path):
+def _file_url(path, kind="png"):
     if not os.path.exists(path):
         return None
     with open(path, "rb") as f:
-        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+        return _bytes_url(f.read(), kind)
+
+
+def _bytes_url(data, kind="png"):
+    return f"data:image/{kind};base64," + base64.b64encode(data).decode() if data else None
+
+
+def _fetch(url, limit=2_000_000):
+    """Small download (cover art). None on any failure; the art is a nice-to-have."""
+    if not url or not url.startswith("https://"):
+        return None
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=6) as r:
+            return r.read(limit)
+    except Exception:
+        return None
 
 
 def _clean_info(d):
