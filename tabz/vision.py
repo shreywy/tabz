@@ -430,6 +430,8 @@ def scan(path, region, fps=4.0, on_progress=None, on_strip=None):
         pending = (img, small, t, crop)
     cap.release()
     strips = rejoin(strips, sp, w)
+    for s in strips:
+        s.n = staff[3]          # string count, so layout can fit exactly that many lines
     if on_progress:
         on_progress(1.0)
     return strips, sp

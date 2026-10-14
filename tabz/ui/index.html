@@ -18,13 +18,12 @@
     <button data-go="home">New</button>
     <button data-go="library">Library <span class="count" id="lib-count"></span></button>
   </nav>
-  <ol class="steps" id="steps" aria-label="Progress" hidden>
-    <li data-step="download"><b>01</b>Download</li>
-    <li data-step="area"><b>02</b>Area</li>
-    <li data-step="scan"><b>03</b>Scan</li>
-    <li data-step="review"><b>04</b>Review</li>
-  </ol>
   <div class="bar-end">
+    <button class="queue-btn" id="queue-btn" title="Queue" aria-label="Queue" aria-expanded="false" hidden>
+      <span class="spin" aria-hidden="true"></span>
+      <span id="queue-label">Queue</span>
+      <span class="badge" id="queue-badge"></span>
+    </button>
     <button class="icon-btn theme-btn" data-action="theme" title="Light or dark (D)" aria-label="Switch light or dark theme">
       <svg class="i-moon" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M15.5 12.6A6.5 6.5 0 0 1 7.4 4.5a6.5 6.5 0 1 0 8.1 8.1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
       <svg class="i-sun" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><circle cx="10" cy="10" r="3.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M4.5 15.5l1.4-1.4M14.1 5.9l1.4-1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
@@ -36,25 +35,27 @@
 </header>
 
 <main>
-  <!-- new: link or search -->
+  <!-- new: link, playlist or search -->
   <section class="screen home" data-screen="home">
     <div class="home-inner">
-      <div class="home-top" id="home-top">
+      <div class="home-top">
         <h1>Tab from play-along videos</h1>
-        <p class="lede">Paste a YouTube link, or search for a song. tabz downloads the video, finds the tab on screen and keeps every bar as a PDF and in your library.</p>
+        <p class="lede">Paste a YouTube link or a playlist, or search for a song. tabz works through them in the background and files every song in your library, with a PDF.</p>
       </div>
       <form id="link-form" class="link" autocomplete="off">
         <svg class="link-icon" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m12.4 12.4 4.3 4.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         <label for="url" class="sr">YouTube link or search</label>
         <input id="url" type="text" required placeholder="youtube.com/watch?v=…  or  hotel california fingerstyle tab" spellcheck="false">
+        <button type="button" class="btn ghost" id="go-list" hidden>Whole playlist</button>
         <button type="submit" class="btn primary" id="go">Search</button>
       </form>
+      <p class="hint form-hint" id="form-hint" hidden></p>
       <p class="error" id="home-error" role="alert" hidden></p>
 
       <div class="results-wrap" id="results-wrap" hidden>
         <div class="section-head">
           <h2 id="results-title">Results</h2>
-          <span class="hint">Pick one with tab on screen. tabz checks the rest.</span>
+          <span class="hint">Click to add to the queue. Add as many as you like.</span>
         </div>
         <ul class="results" id="results"></ul>
       </div>
@@ -65,16 +66,24 @@
           <button class="link-btn" data-go="library">All in library</button>
         </div>
         <ul class="cards compact" id="recent"></ul>
-        <p class="empty" id="recent-empty">Nothing yet. Songs you extract show up here.</p>
+        <p class="empty" id="recent-empty">Nothing yet. Songs you get show up here.</p>
       </div>
     </div>
   </section>
 
   <!-- library -->
   <section class="screen library" data-screen="library">
-    <div class="lib-inner">
+    <aside class="lib-rail" aria-label="Collections">
+      <button class="rail-item" data-coll="__all">All songs <span class="count" id="c-all"></span></button>
+      <button class="rail-item" data-coll="__recent">Played recently</button>
+      <button class="rail-item" data-coll="__loose">Not in a collection</button>
+      <p class="rail-head">Collections</p>
+      <div id="rail-colls"></div>
+      <p class="rail-hint">Playlists get their own collection. Move any song with its menu.</p>
+    </aside>
+    <div class="lib-main">
       <div class="lib-tools">
-        <h1>Library</h1>
+        <h1 id="lib-title">All songs</h1>
         <div class="lib-search">
           <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m12.4 12.4 4.3 4.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
           <input id="lib-filter" type="search" placeholder="Song, artist, chord, capo…" aria-label="Filter library">
@@ -82,41 +91,30 @@
         <div class="seg" id="lib-sort" title="Sort">
           <button data-sort="recent">Recent</button><button data-sort="song">Song</button><button data-sort="artist">Artist</button>
         </div>
-        <button class="link-btn" data-action="open-folder">PDF folder</button>
+        <div class="seg" id="lib-view" title="Cards or list">
+          <button data-view="cards" aria-label="Cards"><svg viewBox="0 0 20 20" width="14" height="14"><rect x="3" y="3" width="6" height="6" rx="1" fill="currentColor"/><rect x="11" y="3" width="6" height="6" rx="1" fill="currentColor"/><rect x="3" y="11" width="6" height="6" rx="1" fill="currentColor"/><rect x="11" y="11" width="6" height="6" rx="1" fill="currentColor"/></svg></button>
+          <button data-view="list" aria-label="List"><svg viewBox="0 0 20 20" width="14" height="14"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="2"/></svg></button>
+        </div>
       </div>
       <ul class="cards" id="library"></ul>
       <div class="empty big" id="library-empty">
         <p>Your library is empty.</p>
         <button class="btn primary" data-go="home">Get your first tab</button>
       </div>
-      <p class="empty" id="library-nomatch" hidden>No songs match that.</p>
+      <p class="empty" id="library-nomatch" hidden>Nothing here matches.</p>
     </div>
   </section>
 
-  <!-- working: download / locate / scan / read -->
-  <section class="screen working" data-screen="working">
-    <div class="working-inner">
-      <p class="kicker" id="work-stage">Downloading</p>
-      <h2 id="work-title">Fetching video…</h2>
-      <p class="notes-line" id="work-notes" hidden></p>
-      <div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100">
-        <div class="meter-fill" id="work-fill"></div>
-      </div>
-      <div class="work-foot">
-        <span id="work-detail"></span>
-        <span class="mono" id="work-pct">0%</span>
-      </div>
-    </div>
-  </section>
-
-  <!-- area -->
+  <!-- area check for one queued video -->
   <section class="screen area" data-screen="area">
     <div class="area-main">
       <div class="stage" id="stage">
-        <img id="frame" alt="Video frame">
-        <div class="crop" id="crop">
-          <i data-h="nw"></i><i data-h="n"></i><i data-h="ne"></i><i data-h="e"></i>
-          <i data-h="se"></i><i data-h="s"></i><i data-h="sw"></i><i data-h="w"></i>
+        <div class="frame-box" id="frame-box">
+          <img id="frame" alt="Video frame">
+          <div class="crop" id="crop">
+            <i data-h="nw"></i><i data-h="n"></i><i data-h="ne"></i><i data-h="e"></i>
+            <i data-h="se"></i><i data-h="s"></i><i data-h="sw"></i><i data-h="w"></i>
+          </div>
         </div>
       </div>
       <div class="scrub">
@@ -126,35 +124,54 @@
       </div>
     </div>
     <aside class="side">
-      <p class="kicker">Step 2</p>
-      <h2>Check the tab area</h2>
+      <p class="kicker">Check the tab area</p>
+      <h2 id="area-title"></h2>
+      <p class="muted" id="area-sub"></p>
+      <div class="countdown" id="countdown">
+        <div class="cd-bar"><i id="cd-fill"></i></div>
+        <p id="cd-text"></p>
+      </div>
       <p id="area-msg"></p>
-      <dl class="facts" id="area-facts"></dl>
       <div class="side-actions">
-        <button class="btn primary" id="scan-btn">Scan video</button>
+        <button class="btn primary" id="scan-btn">Scan with this box</button>
         <button class="btn ghost" id="reset-box">Reset box</button>
+      </div>
+      <div class="side-actions">
+        <button class="btn ghost" data-go="library">Keep browsing</button>
+        <button class="btn ghost danger-text" id="skip-job">Skip this video</button>
       </div>
     </aside>
   </section>
 
-  <!-- review -->
+  <!-- review / edit a saved song -->
   <section class="screen review" data-screen="review">
     <div class="pages" id="pages" aria-label="PDF preview"></div>
     <aside class="side review-side">
-      <div class="saved">
-        <p class="kicker">Saved</p>
-        <p class="saved-name" id="saved-name"></p>
-        <div class="side-actions">
-          <button class="btn primary" data-action="play-current">Open in reader</button>
-          <button class="btn ghost" data-action="open-pdf">PDF</button>
-          <button class="btn ghost" data-action="show-pdf">Folder</button>
+      <div class="review-head">
+        <div>
+          <p class="kicker">Review</p>
+          <p class="saved-name" id="saved-name"></p>
         </div>
+        <button class="btn done" data-action="review-done">Done</button>
       </div>
+      <div class="side-actions">
+        <button class="btn primary" data-action="play-current">Open in reader</button>
+        <button class="btn ghost" data-action="open-pdf">PDF</button>
+        <button class="btn ghost" data-action="show-pdf">Folder</button>
+      </div>
+
+      <details class="video-box" id="video-box">
+        <summary>Video</summary>
+        <div class="video-frame" id="video-frame"></div>
+      </details>
 
       <form class="group details" id="details" autocomplete="off">
         <span class="group-label">Song details</span>
         <label class="fld wide"><span>Song</span><input name="song"></label>
-        <label class="fld wide"><span>Artist</span><input name="artist"></label>
+        <div class="fld-row">
+          <label class="fld"><span>Artist</span><input name="artist"></label>
+          <label class="fld"><span>Album</span><input name="album"></label>
+        </div>
         <div class="fld-row">
           <label class="fld"><span>Capo</span><input name="capo" inputmode="numeric" placeholder="–"></label>
           <label class="fld"><span>Tuning</span><input name="tuning" placeholder="Standard"></label>
@@ -186,8 +203,6 @@
         <p class="hint">Click a strip to leave it out.</p>
         <ul class="strips" id="strips"></ul>
       </div>
-
-      <button class="btn ghost wide" data-action="new">Done</button>
     </aside>
   </section>
 
@@ -205,9 +220,10 @@
         </div>
         <input type="range" id="zoom" min="0" max="1000" value="500" aria-label="Size" title="Size (+ and -)">
       </div>
-      <div class="seg" id="view-mode" title="Scroll, or turn pages (← →)">
+      <div class="seg" id="view-mode" title="Scroll freely, or turn pages (← →)">
         <button data-mode="scroll">Scroll</button><button data-mode="pages">Pages</button>
       </div>
+      <button class="btn ghost small" id="follow" title="Move through the song by itself at the video's pace (scaled by the tempo)">Follow</button>
 
       <div class="ctl metro">
         <div class="beats" id="beat-dots" aria-hidden="true"></div>
@@ -217,7 +233,7 @@
           <button class="step-btn" data-bpm="1" aria-label="Faster">+</button>
         </div>
         <button class="btn ghost small" id="tap" title="Tap along to set the tempo (T)">Tap</button>
-        <button class="btn primary small" id="metro-go" title="Start or stop (Space)">Start</button>
+        <button class="btn primary small" id="metro-go" title="Start or stop the click (Space)">Start</button>
         <button class="icon-btn" id="metro-more" title="Click sound and timing" aria-label="Metronome options" aria-expanded="false">
           <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -254,8 +270,8 @@
     <div class="reader">
       <div class="sheet-view" id="sheet"></div>
       <div class="page-nav" id="page-nav" hidden>
-        <button class="pn prev" data-action="page-prev" aria-label="Previous page"></button>
-        <button class="pn next" data-action="page-next" aria-label="Next page"></button>
+        <button class="pn prev" data-action="page-prev" aria-label="Previous page"><span>‹</span></button>
+        <button class="pn next" data-action="page-next" aria-label="Next page"><span>›</span></button>
         <span class="page-no mono" id="page-no"></span>
       </div>
       <aside class="info-drawer" id="info-drawer" hidden>
@@ -264,6 +280,21 @@
     </div>
   </section>
 </main>
+
+<!-- queue panel -->
+<aside class="queue" id="queue" hidden aria-label="Queue">
+  <div class="queue-head">
+    <h2>Queue</h2>
+    <button class="link-btn" id="queue-clear">Clear finished</button>
+    <button class="icon-btn" id="queue-close" aria-label="Close queue">
+      <svg viewBox="0 0 20 20" width="16" height="16"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <ul class="queue-list" id="queue-list"></ul>
+  <p class="empty" id="queue-empty">Nothing queued. Add a link or a playlist from New.</p>
+</aside>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
 
 <div class="sheet-backdrop" id="settings" hidden>
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -274,7 +305,15 @@
         <code id="out-dir"></code>
         <button class="btn ghost" id="pick-folder">Change</button>
       </div>
-      <p class="hint">Songs for the reader are kept in a <code>.tabz</code> folder next to tabz.exe.</p>
+      <p class="hint">Songs from a playlist go in a subfolder named after it. The library lives in a <code>.tabz</code> folder next to tabz.exe.</p>
+    </div>
+    <div class="group">
+      <span class="group-label">Gemini API key (optional)</span>
+      <div class="folder">
+        <input id="gemini-key" class="field" type="password" placeholder="Paste a key from aistudio.google.com" autocomplete="off" spellcheck="false">
+        <button class="btn ghost" id="save-key">Save</button>
+      </div>
+      <p class="hint" id="gemini-state">With a key, Gemini also reads each video's title and description for the song, artist, capo, tuning and tempo. Everything works without one. The key is stored only in tabz's own settings file.</p>
     </div>
     <div class="group">
       <span class="group-label">Keys in the reader</span>
@@ -284,7 +323,8 @@
         <dt>T</dt><dd>Tap tempo</dd>
         <dt>1–4</dt><dd>Screens per line</dd>
         <dt>+ −</dt><dd>Size</dd>
-        <dt>← →</dt><dd>Turn page (Pages view), page turner pedals work too</dd>
+        <dt>← →</dt><dd>Turn page; page turner pedals work too</dd>
+        <dt>G</dt><dd>Follow on or off</dd>
         <dt>F</dt><dd>Full screen</dd>
         <dt>D</dt><dd>Light or dark</dd>
       </dl>
@@ -293,15 +333,19 @@
   </div>
 </div>
 
-<div class="sheet-backdrop" id="confirm" hidden>
-  <div class="dialog small" role="alertdialog" aria-modal="true" aria-labelledby="confirm-text">
-    <p id="confirm-text"></p>
+<div class="sheet-backdrop" id="dialog" hidden>
+  <div class="dialog small" role="alertdialog" aria-modal="true" aria-labelledby="dialog-text">
+    <p id="dialog-text"></p>
+    <input id="dialog-input" class="field" hidden list="coll-names">
+    <datalist id="coll-names"></datalist>
     <div class="side-actions">
-      <button class="btn danger" id="confirm-yes">Delete</button>
-      <button class="btn ghost" id="confirm-no">Keep</button>
+      <button class="btn primary" id="dialog-yes">OK</button>
+      <button class="btn ghost" id="dialog-no">Cancel</button>
     </div>
   </div>
 </div>
+
+<div class="menu" id="card-menu" hidden role="menu"></div>
 
 <script src="app.js"></script>
 <script src="play.js"></script>

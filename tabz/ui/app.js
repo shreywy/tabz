@@ -6,22 +6,27 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 
 const state = {
   screen: "home",
-  stage: null,
-  busy: false,
-  meta: null,
-  area: null,      // {width, height, duration, region, found, time}
-  box: null,       // [x, y, w, h] in source pixels
-  review: null,
-  removed: new Set(),
+  prev: "home",           // where to go back to from the area check / review
   settings: {},
   library: [],
+  coll: "__all",
   sort: "recent",
+  view: "cards",
+  jobs: [],
+  watch: null,            // job the user just added from New: open its area check when ready
+  told: new Set(),        // jobs we've already shown an area toast for
+  area: null,             // {job, box, deadline, held}
+  review: null,
+  removed: new Set(),
 };
+try { state.view = localStorage.getItem("tabz.libview") || "cards"; } catch {}
 
-// ---- helpers ----------------------------------------------------------------
+// ---- helpers -------------------------------------------------------------------
 const clock = (s) => { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 const today = () => new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-const isLink = (s) => /^(https?:\/\/|www\.|youtu\.?be|m\.youtube|youtube\.com)/i.test(s.trim());
+const isLink = (s) => /^(https?:\/\/|www\.|youtu\.?be|m\.youtube|youtube\.com|music\.youtube)/i.test(s.trim());
+const hasList = (s) => /[?&]list=/.test(s);
+const ytId = (url) => (String(url || "").match(/[?&]v=([\w-]{6,})/) || [])[1];
 function when(ts) {
   const d = new Date(ts * 1000), now = new Date();
   const days = Math.floor((new Date(now.toDateString()) - new Date(d.toDateString())) / 864e5);
@@ -45,39 +50,49 @@ function infoChips(info, { max = 9, chords = true } = {}) {
   if (chords) for (const ch of info.chords || []) c.push(ch);
   return c.slice(0, max).map((x) => (x.startsWith("<span") ? x : `<span class="chip">${esc(x)}</span>`)).join("");
 }
-
-// ---- screens and navigation -----------------------------------------------------
-function show(screen) {
-  state.screen = screen;
-  $$(".screen").forEach((s) => s.classList.toggle("on", s.dataset.screen === screen));
-  const flow = ["working", "area", "review"].includes(screen);
-  $("#steps").hidden = !flow;
-  $$(".nav button").forEach((b) => b.classList.toggle("on", !flow && b.dataset.go === screen));
-  const step = screen === "working" ? (["scan", "read"].includes(state.stage) ? "scan" : "download") : screen;
-  const order = ["download", "area", "scan", "review"];
-  $$(".steps li").forEach((li) => {
-    const i = order.indexOf(li.dataset.step), cur = order.indexOf(step);
-    li.classList.toggle("now", i === cur);
-    li.classList.toggle("done", i < cur);
+function toast(text, actions = [], ms = 6000) {
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.innerHTML = `<span>${esc(text)}</span>`;
+  for (const [label, fn] of actions) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = () => { t.remove(); fn(); };
+    t.appendChild(b);
+  }
+  $("#toasts").appendChild(t);
+  setTimeout(() => t.remove(), ms);
+}
+function ask(text, { input = null, ok = "OK", danger = false } = {}) {
+  return new Promise((done) => {
+    $("#dialog-text").textContent = text;
+    const inp = $("#dialog-input");
+    inp.hidden = input === null;
+    inp.value = input ?? "";
+    $("#dialog-yes").textContent = ok;
+    $("#dialog-yes").className = `btn ${danger ? "danger" : "primary"}`;
+    $("#dialog").hidden = false;
+    (input === null ? $("#dialog-no") : inp).focus();
+    const close = (v) => { $("#dialog").hidden = true; done(v); };
+    $("#dialog-yes").onclick = () => close(input === null ? true : inp.value.trim());
+    $("#dialog-no").onclick = () => close(null);
+    inp.onkeydown = (e) => { if (e.key === "Enter") close(inp.value.trim()); };
   });
 }
 
-async function go(where) {
-  if (state.screen === "working") return;          // let a running job finish
-  if (["area", "review"].includes(state.screen)) { await api().finish(); state.review = null; }
-  if (where === "library") { await refreshLibrary(); show("library"); $("#lib-filter").focus(); }
-  else { show("home"); refreshLibrary(); $("#url").focus(); }
+// ---- screens -----------------------------------------------------------------------
+function show(screen) {
+  if (state.screen !== screen && !["area", "review", "play"].includes(state.screen)) state.prev = state.screen;
+  state.screen = screen;
+  $$(".screen").forEach((s) => s.classList.toggle("on", s.dataset.screen === screen));
+  $$(".nav button").forEach((b) => b.classList.toggle("on", b.dataset.go === screen));
 }
 
-function meter(p) {
-  const m = $(".meter");
-  m.classList.toggle("wait", p == null);
-  if (p != null) {
-    $("#work-fill").style.width = `${(p * 100).toFixed(1)}%`;
-    $("#work-pct").textContent = `${Math.round(p * 100)}%`;
-  } else {
-    $("#work-pct").textContent = "";
-  }
+async function go(where) {
+  if (state.screen === "review") await api().close_review();
+  if (state.screen === "play") leavePlay(true);
+  if (where === "library") { await refreshLibrary(); show("library"); }
+  else { show("home"); refreshLibrary(); $("#url").focus(); }
 }
 
 // ---- theme ---------------------------------------------------------------------------
@@ -91,91 +106,128 @@ function toggleTheme() {
   try { localStorage.setItem("tabz.theme", next); } catch {}
 }
 
-// ---- events from Python ----------------------------------------------------------------
+// ---- events from Python ------------------------------------------------------------------
 window.tabz = { on(event, data) { handlers[event]?.(data); } };
 
+const STATUS = {
+  queued: "Waiting", download: "Downloading", locate: "Reading", area: "Check area", scan: "Scanning",
+  read: "Chords", save: "Saving", done: "Done", failed: "Failed", skipped: "Skipped", cancelled: "Cancelled",
+};
+const ACTIVE = ["queued", "download", "locate", "area", "scan", "read", "save"];
+
 const handlers = {
-  stage({ stage }) {
-    state.stage = stage;
-    state.busy = true;
-    show("working");
-    $("#work-stage").textContent = { download: "Downloading", locate: "Looking for the tab", scan: "Scanning", read: "Reading chords" }[stage];
-    $("#work-detail").textContent = {
-      download: "Video only, no audio. It's deleted when you're done.",
-      locate: "Finding the string lines and reading capo, tuning and tempo notes.",
-      scan: "Watching the box for new bars.",
-      read: "Reading chord names and tempo marks above the staff.",
-    }[stage];
-    meter(["locate", "read"].includes(stage) ? null : 0);
-  },
-  progress(p) { meter(p); },
-  meta(m) {
-    state.meta = m;
-    const i = m.info || {};
-    $("#work-title").textContent = i.song ? `${i.song}${i.artist ? ` · ${i.artist}` : ""}` : m.title;
-    $("#work-notes").textContent = m.notes || "";
-    $("#work-notes").hidden = !m.notes;
-  },
-  found(n) { $("#work-detail").textContent = `${n} ${n === 1 ? "strip" : "strips"} found so far`; },
-  area(a) {
-    state.busy = false;
-    state.area = a;
-    state.box = [...a.region];
-    $("#scrub-dur").textContent = clock(a.duration);
-    $("#scrub").value = Math.round((a.time / a.duration) * 1000);
-    $("#area-msg").classList.remove("error");
-    $("#area-msg").textContent = a.found
-      ? "The box is a guess. Drag it or its edges so it covers the string lines and the chord names above them. Scrub through the video to check it fits the whole way."
-      : "tabz couldn't find tab lines by itself, so the box starts on the bottom third. Drag it over the tab, then scan.";
-    const i = state.meta?.info || {};
-    const rows = [["Song", i.song], ["Artist", i.artist], ["Length", clock(a.duration)], ["Found", state.meta?.notes]];
-    $("#area-facts").innerHTML = rows.filter(([, v]) => v).map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
-    show("area");
-    loadFrame(a.time);
-  },
-  review(r) {
-    state.busy = false;
-    state.review = r;
-    if (r.info) state.meta = { ...(state.meta || {}), info: r.info, notes: r.notes };
-    state.removed = new Set(r.strips.filter((s) => s.removed).map((s) => s.i));
-    $("#pages").classList.remove("busy");
-    show("review");
-    renderReview();
-  },
-  error(msg) {
-    state.busy = false;
-    if (["scan", "read"].includes(state.stage) && state.area) {
-      show("area");
-      $("#area-msg").textContent = msg;
-      $("#area-msg").classList.add("error");
-    } else {
-      show("home");
-      $("#home-error").textContent = msg;
-      $("#home-error").hidden = false;
-      refreshLibrary();
+  jobs(list) {
+    const before = new Map(state.jobs.map((j) => [j.id, j.status]));
+    state.jobs = list;
+    renderQueue();
+    for (const j of list) {
+      if (j.status === "area" && before.get(j.id) !== "area") onAreaReady(j);
+      if (state.area?.job.id === j.id) syncArea(j);
     }
+  },
+  job_done(j) {
+    refreshLibrary();
+    if (state.area?.job.id === j.id) leaveArea();
+    toast(`Ready: ${j.title}`, [["Open", () => openSong(j.song, state.screen)], ["Review", () => openReview(j.song)]], 9000);
   },
 };
 
-// ---- new: link or search -------------------------------------------------------------------
-$("#url").addEventListener("input", (e) => {
-  $("#go").textContent = isLink(e.target.value) ? "Get tabs" : "Search";
+// ---- queue -----------------------------------------------------------------------------
+function renderQueue() {
+  const active = state.jobs.filter((j) => ACTIVE.includes(j.status));
+  const waiting = state.jobs.filter((j) => j.status === "area");
+  const btn = $("#queue-btn");
+  btn.hidden = state.jobs.length === 0;
+  btn.classList.toggle("busy", active.length > 0);
+  btn.classList.toggle("attn", waiting.length > 0);
+  $("#queue-badge").textContent = active.length || "";
+  const running = state.jobs.find((j) => ["download", "locate", "scan", "read", "save"].includes(j.status));
+  $("#queue-label").textContent = waiting.length ? "Check area" : running ? `${STATUS[running.status]} ${Math.round(running.progress * 100)}%` : "Queue";
+
+  const ul = $("#queue-list");
+  let html = "", group;
+  for (const j of state.jobs) {
+    if (j.collection !== group) {
+      group = j.collection;
+      if (group) html += `<li class="q-group">${esc(group)}</li>`;
+    }
+    const pct = Math.round(j.progress * 100);
+    const showBar = ["download", "scan"].includes(j.status);
+    let sub = j.error || j.detail || "";
+    if (j.status === "scan" && j.found) sub = `${j.found} ${j.found === 1 ? "strip" : "strips"} so far`;
+    if (j.status === "area") sub = j.held ? "Waiting for you" : `Going ahead with the guess in ${j.left}s`;
+    if (j.status === "done" && j.notes) sub = j.notes;
+    const acts = [];
+    if (j.status === "area") acts.push(`<button class="link-btn" data-q="area" data-id="${j.id}">Check area</button>`);
+    if (j.status === "done" && j.song) acts.push(`<button class="link-btn" data-q="open" data-id="${j.id}">Open</button>`, `<button class="link-btn" data-q="review" data-id="${j.id}">Review</button>`);
+    if (ACTIVE.includes(j.status)) acts.push(`<button class="link-btn" data-q="cancel" data-id="${j.id}">Cancel</button>`);
+    html += `<li class="qitem ${j.status}">
+      <div class="q-top"><span class="q-title" title="${esc(j.title)}">${esc(j.title)}</span><span class="q-state">${STATUS[j.status]}${showBar ? ` ${pct}%` : ""}</span></div>
+      ${sub ? `<span class="q-sub">${esc(sub)}</span>` : ""}
+      ${showBar ? `<div class="q-bar"><i style="width:${pct}%"></i></div>` : ""}
+      ${acts.length ? `<div class="q-acts">${acts.join("")}</div>` : ""}
+    </li>`;
+  }
+  ul.innerHTML = html;
+  $("#queue-empty").hidden = state.jobs.length > 0;
+}
+
+function toggleQueue(open) {
+  const q = $("#queue");
+  q.hidden = open === undefined ? !q.hidden : !open;
+  $("#queue-btn").setAttribute("aria-expanded", String(!q.hidden));
+}
+$("#queue-btn").onclick = () => toggleQueue();
+$("#queue-close").onclick = () => toggleQueue(false);
+$("#queue-clear").onclick = () => api().jobs_clear();
+$("#queue-list").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-q]");
+  if (!b) return;
+  const j = state.jobs.find((x) => x.id === Number(b.dataset.id));
+  if (!j) return;
+  if (b.dataset.q === "area") { toggleQueue(false); openArea(j); }
+  if (b.dataset.q === "open") { toggleQueue(false); openSong(j.song, state.screen); }
+  if (b.dataset.q === "review") { toggleQueue(false); openReview(j.song); }
+  if (b.dataset.q === "cancel") api().job_cancel(j.id);
 });
+
+// ---- new: link, playlist or search ------------------------------------------------------------
+function syncForm() {
+  const v = $("#url").value;
+  const link = isLink(v);
+  const list = link && hasList(v);
+  $("#go").textContent = link ? (list ? "Just this video" : "Get tabs") : "Search";
+  $("#go-list").hidden = !list;
+  $("#form-hint").hidden = !list;
+  $("#form-hint").textContent = "This link is part of a playlist. Get just this video, or every video in it, filed together.";
+}
+$("#url").addEventListener("input", syncForm);
 
 $("#link-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = $("#url").value.trim();
   if (!q) return;
   $("#home-error").hidden = true;
-  if (isLink(q)) return startJob(q);
+  if (isLink(q)) return addLink(q, false);
   search(q);
 });
+$("#go-list").onclick = () => addLink($("#url").value.trim(), true);
 
-async function startJob(url) {
-  state.meta = null;
-  $("#work-title").textContent = "Fetching video…";
-  $("#work-notes").hidden = true;
-  await api().start(url);
+async function addLink(url, whole) {
+  const r = await api().add(url, whole);
+  if (r.error) {
+    $("#home-error").textContent = r.error;
+    $("#home-error").hidden = false;
+    return;
+  }
+  $("#url").value = "";
+  syncForm();
+  if (r.playlist) {
+    toast(`Queued ${r.added} from “${r.playlist}”${r.skipped ? `. Skipped ${r.skipped} (private or deleted)` : ""}.`, [["Show queue", () => toggleQueue(true)]]);
+  } else {
+    state.watch = r.job;
+    toast("Added to the queue. Keep browsing; tabz asks you to check the tab area when it's ready.", [["Show queue", () => toggleQueue(true)]]);
+  }
 }
 
 let searchId = 0;
@@ -199,117 +251,87 @@ async function search(q) {
     <li class="result" data-url="${esc(v.url)}" title="${esc(v.title)}">
       <div class="thumb"><img src="${esc(v.thumb)}" alt="" loading="lazy">
         ${v.duration ? `<span class="dur">${clock(v.duration)}</span>` : ""}
-        <span class="go">${have.has(v.id) ? "In your library" : "Get tabs"}</span></div>
+        <span class="go">${have.has(v.id) ? "In your library" : "Add to queue"}</span></div>
       <b>${esc(v.title)}</b>
       <span class="by">${esc(v.channel)}${v.views ? ` · ${views(v.views)}` : ""}</span>
     </li>`).join("") || `<p class="empty">Nothing found.</p>`;
 }
-$("#results").addEventListener("click", (e) => {
+$("#results").addEventListener("click", async (e) => {
   const li = e.target.closest(".result[data-url]");
-  if (li) startJob(li.dataset.url);
-});
-
-// ---- library --------------------------------------------------------------------------------
-async function refreshLibrary() {
-  state.library = await api().library();
-  $("#lib-count").textContent = state.library.length || "";
-  renderRecent();
-  renderLibrary();
-}
-
-function cardHtml(it) {
-  const i = it.info || {};
-  const song = i.song || it.name;
-  const thumb = it.thumb
-    ? `<div class="tab-thumb"><img src="${it.thumb}" alt=""></div>`
-    : `<div class="tab-thumb pdf">PDF only</div>`;
-  return `
-    <li class="card" data-song="${esc(it.song || "")}" data-path="${esc(it.path || "")}">
-      ${thumb}
-      <div class="body">
-        <div class="title-row">
-          ${it.art ? `<img class="art" src="${it.art}" alt="">` : ""}
-          <div><span class="song">${esc(song)}</span>
-          ${i.artist ? `<span class="artist">${esc([i.artist, i.year].filter(Boolean).join(" · "))}</span>` : ""}</div>
-        </div>
-        <div class="chips">${infoChips(i, { max: 8 })}</div>
-        <div class="foot">
-          <span>${esc([it.channel, when(it.when)].filter(Boolean).join(" · "))}</span>
-          <span class="acts">
-            ${it.path ? `<button class="icon-btn" data-card="pdf" title="Open PDF" aria-label="Open PDF"><svg viewBox="0 0 20 20" width="15" height="15"><path d="M5 2.8h6.5L15.2 6.5v10.7H5Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M11.3 2.8v3.9h3.9" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>` : ""}
-            ${it.url ? `<button class="icon-btn" data-card="video" title="Watch on YouTube" aria-label="Watch on YouTube"><svg viewBox="0 0 20 20" width="15" height="15"><rect x="2.8" y="4.8" width="14.4" height="10.4" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m8.6 7.8 3.8 2.2-3.8 2.2Z" fill="currentColor"/></svg></button>` : ""}
-            ${it.song ? `<button class="icon-btn" data-card="delete" title="Remove from library" aria-label="Remove from library"><svg viewBox="0 0 20 20" width="15" height="15"><path d="M4.5 6h11M8 6V4.2h4V6M6 6l.7 10.2h6.6L14 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>` : ""}
-          </span>
-        </div>
-      </div>
-    </li>`;
-}
-
-function renderRecent() {
-  const items = state.library.slice(0, 4);
-  $("#recent").innerHTML = items.map(cardHtml).join("");
-  $("#recent-empty").hidden = items.length > 0;
-}
-
-function renderLibrary() {
-  const q = $("#lib-filter").value.trim().toLowerCase();
-  let items = state.library.filter((it) => {
-    if (!q) return true;
-    const i = it.info || {};
-    const hay = [it.name, i.song, i.artist, i.album, i.year, i.genre, it.channel, i.key, i.tuning, ...(i.chords || []),
-      i.capo != null ? `capo ${i.capo}` : "", i.tempo ? `${i.tempo} bpm` : ""].join(" ").toLowerCase();
-    return q.split(/\s+/).every((w) => hay.includes(w));
-  });
-  const key = (it) => (state.sort === "artist" ? it.info?.artist : it.info?.song || it.name) || "~";
-  if (state.sort !== "recent") items = [...items].sort((a, b) => key(a).localeCompare(key(b), undefined, { sensitivity: "base" }));
-  $("#library").innerHTML = items.map(cardHtml).join("");
-  $("#library-empty").hidden = state.library.length > 0;
-  $("#library-nomatch").hidden = !(state.library.length && !items.length);
-  $$("#lib-sort button").forEach((b) => b.classList.toggle("on", b.dataset.sort === state.sort));
-}
-
-$("#lib-filter").addEventListener("input", renderLibrary);
-$("#lib-sort").addEventListener("click", (e) => {
-  const b = e.target.closest("button");
-  if (!b) return;
-  state.sort = b.dataset.sort;
-  renderLibrary();
-});
-
-function onCardClick(e) {
-  const card = e.target.closest(".card");
-  if (!card) return;
-  const it = state.library.find((x) => (x.song || "") === card.dataset.song && (x.path || "") === card.dataset.path);
-  if (!it) return;
-  const act = e.target.closest("[data-card]")?.dataset.card;
-  if (act === "pdf") return api().open_path(it.path);
-  if (act === "video") return api().open_url(it.url);
-  if (act === "delete") {
-    return confirmBox(`Remove “${it.info?.song || it.name}” from your library? The PDF stays in its folder.`, async () => {
-      await api().delete_song(it.song);
-      refreshLibrary();
-    });
+  if (!li) return;
+  const r = await api().add(li.dataset.url, false);
+  if (r.job) {
+    li.querySelector(".go").textContent = "Queued";
+    li.querySelector(".go").style.opacity = 1;
+    toast("Added to the queue.", [["Show queue", () => toggleQueue(true)]], 3500);
   }
-  if (it.song) openSong(it.song, state.screen);
-  else api().open_path(it.path);
-}
-$("#library").addEventListener("click", onCardClick);
-$("#recent").addEventListener("click", onCardClick);
+});
 
-function confirmBox(text, yes) {
-  $("#confirm-text").textContent = text;
-  $("#confirm").hidden = false;
-  $("#confirm-no").focus();
-  $("#confirm-yes").onclick = () => { $("#confirm").hidden = true; yes(); };
-  $("#confirm-no").onclick = () => { $("#confirm").hidden = true; };
+// ---- area check ------------------------------------------------------------------------------
+function onAreaReady(j) {
+  if (state.told.has(j.id)) return;
+  state.told.add(j.id);
+  // the user just added this one and isn't busy elsewhere: show it straight away
+  const idle = ["home", "library"].includes(state.screen) && $("#dialog").hidden;
+  if (state.watch === j.id && idle) return openArea(j);
+  if (!j.collection) toast(`Check the tab area for “${j.title}”`, [["Check", () => openArea(j)]], 14000);
 }
 
-// ---- area: frame + crop box ------------------------------------------------------------------
+async function openArea(j) {
+  const job = state.jobs.find((x) => x.id === j.id) || j;
+  if (job.status !== "area") return;
+  state.area = { job, box: [...job.area.region], deadline: Date.now() + (job.left ?? 15) * 1000, held: job.held };
+  show("area");
+  $("#area-title").textContent = job.title;
+  $("#area-sub").textContent = [job.notes, clock(job.area.duration)].filter(Boolean).join("  ·  ");
+  $("#area-msg").textContent = job.area.found
+    ? "The box is a guess. Drag it or its edges so it covers the string lines and the chord names above them. Scrub through to check it fits the whole way."
+    : "tabz couldn't find tab lines by itself, so the box starts on the bottom third. Drag it over the tab, then scan.";
+  $("#scrub-dur").textContent = clock(job.area.duration);
+  $("#scrub").value = Math.round((job.area.time / job.area.duration) * 1000);
+  tickArea();
+  loadFrame(job.area.time);
+}
+
+function syncArea(j) {
+  state.area.job = j;
+  if (j.status !== "area" && state.screen === "area") {
+    // went ahead without us (timer ran out) or got cancelled
+    leaveArea();
+    if (j.status === "scan") toast(`Scanning “${j.title}” with the guessed box.`);
+  }
+}
+
+function hold() {
+  const a = state.area;
+  if (!a || a.held) return;
+  a.held = true;
+  api().job_hold(a.job.id);
+  tickArea();
+}
+
+function tickArea() {
+  const a = state.area;
+  if (!a || state.screen !== "area") return;
+  const total = 15, left = Math.max(0, (a.deadline - Date.now()) / 1000);
+  $("#countdown").classList.toggle("held", a.held);
+  $("#cd-fill").style.width = a.held ? "100%" : `${(left / total) * 100}%`;
+  $("#cd-text").textContent = a.held
+    ? "Timer stopped. Scan when the box looks right."
+    : `Scanning with this box in ${Math.ceil(left)}s. Touch the box to take your time.`;
+  if (!a.held) setTimeout(tickArea, 250);
+}
+
+function leaveArea() {
+  state.area = null;
+  if (state.screen === "area") show(["area", "review", "play"].includes(state.prev) ? "library" : state.prev);
+}
+
 let frameReq = 0;
 async function loadFrame(t) {
   const id = ++frameReq;
   $("#scrub-time").textContent = clock(t);
-  const src = await api().frame(t);
+  const src = await api().job_frame(state.area.job.id, t);
   if (id !== frameReq || !src) return;
   const img = $("#frame");
   img.onload = placeBox;
@@ -317,24 +339,21 @@ async function loadFrame(t) {
 }
 
 $("#scrub").addEventListener("input", (e) => {
-  const t = (e.target.value / 1000) * state.area.duration;
+  hold();
+  const t = (e.target.value / 1000) * state.area.job.area.duration;
   $("#scrub-time").textContent = clock(t);
   clearTimeout(loadFrame.t);
   loadFrame.t = setTimeout(() => loadFrame(t), 60);
 });
 
-const frameScale = () => $("#frame").clientWidth / state.area.width;
+const frameScale = () => $("#frame").clientWidth / state.area.job.area.width;
 
 function placeBox() {
-  const img = $("#frame"), stage = $("#stage"), crop = $("#crop");
-  if (!img.naturalWidth || !state.box) return;
+  const img = $("#frame"), crop = $("#crop");
+  if (!img.naturalWidth || !state.area) return;
   const s = frameScale();
-  const ir = img.getBoundingClientRect(), sr = stage.getBoundingClientRect();
-  const [x, y, w, h] = state.box;
-  Object.assign(crop.style, {
-    left: `${ir.left - sr.left + x * s}px`, top: `${ir.top - sr.top + y * s}px`,
-    width: `${w * s}px`, height: `${h * s}px`,
-  });
+  const [x, y, w, h] = state.area.box;
+  Object.assign(crop.style, { left: `${x * s}px`, top: `${y * s}px`, width: `${w * s}px`, height: `${h * s}px` });
 }
 window.addEventListener("resize", placeBox);
 
@@ -343,12 +362,13 @@ window.addEventListener("resize", placeBox);
   let start = null;
   crop.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    hold();
     crop.setPointerCapture(e.pointerId);
-    start = { x: e.clientX, y: e.clientY, box: [...state.box], h: e.target.dataset.h || "move" };
+    start = { x: e.clientX, y: e.clientY, box: [...state.area.box], h: e.target.dataset.h || "move" };
   });
   crop.addEventListener("pointermove", (e) => {
     if (!start) return;
-    const s = frameScale(), W = state.area.width, H = state.area.height, min = 40;
+    const s = frameScale(), W = state.area.job.area.width, H = state.area.job.area.height, min = 40;
     const dx = (e.clientX - start.x) / s, dy = (e.clientY - start.y) / s;
     let [x, y, w, h] = start.box;
     const hd = start.h;
@@ -361,7 +381,7 @@ window.addEventListener("resize", placeBox);
       if (hd.includes("n")) { const ny = Math.min(Math.max(0, y + dy), y + h - min); h += y - ny; y = ny; }
       if (hd.includes("s")) h = Math.min(Math.max(min, h + dy), H - y);
     }
-    state.box = [x, y, w, h].map(Math.round);
+    state.area.box = [x, y, w, h].map(Math.round);
     placeBox();
   });
   const end = () => (start = null);
@@ -369,13 +389,210 @@ window.addEventListener("resize", placeBox);
   crop.addEventListener("pointercancel", end);
 })();
 
-$("#reset-box").onclick = () => { state.box = [...state.area.region]; placeBox(); };
+$("#reset-box").onclick = () => { hold(); state.area.box = [...state.area.job.area.region]; placeBox(); };
 $("#scan-btn").onclick = async () => {
-  $("#work-detail").textContent = "";
-  await api().scan(state.box);
+  const a = state.area;
+  await api().job_confirm(a.job.id, a.box);
+  toast(`Scanning “${a.job.title}”. It'll be in your library when it's done.`, [["Show queue", () => toggleQueue(true)]]);
+  leaveArea();
+};
+$("#skip-job").onclick = async () => {
+  await api().job_cancel(state.area.job.id);
+  leaveArea();
 };
 
-// ---- review -------------------------------------------------------------------------------------
+// ---- library ---------------------------------------------------------------------------------
+async function refreshLibrary() {
+  state.library = await api().library();
+  $("#lib-count").textContent = state.library.length || "";
+  renderRecent();
+  renderRail();
+  renderLibrary();
+}
+
+function cardHtml(it, compact) {
+  const i = it.info || {};
+  const song = i.song || it.name;
+  const thumb = it.thumb
+    ? `<div class="tab-thumb"><img src="${it.thumb}" alt="" loading="lazy"></div>`
+    : `<div class="tab-thumb pdf">PDF only</div>`;
+  return `
+    <li class="card" data-key="${esc(it.song || it.path)}">
+      ${thumb}
+      <div class="body">
+        <div class="title-row">
+          ${it.art ? `<img class="art" src="${it.art}" alt="" loading="lazy">` : ""}
+          <div><span class="song">${esc(song)}</span>
+          ${i.artist ? `<span class="artist">${esc([i.artist, i.year].filter(Boolean).join(" · "))}</span>` : ""}
+          ${!compact && it.collection && state.coll === "__all" ? `<span class="coll">${esc(it.collection)}</span>` : ""}</div>
+        </div>
+        <div class="chips">${infoChips(i, { max: 8 })}</div>
+        <div class="foot">
+          <span>${esc([it.channel, when(it.created || it.when)].filter(Boolean).join(" · "))}</span>
+          <span class="acts"><button class="icon-btn" data-card="menu" title="More" aria-label="More">
+            <svg viewBox="0 0 20 20" width="16" height="16"><circle cx="5" cy="10" r="1.5" fill="currentColor"/><circle cx="10" cy="10" r="1.5" fill="currentColor"/><circle cx="15" cy="10" r="1.5" fill="currentColor"/></svg>
+          </button></span>
+        </div>
+      </div>
+    </li>`;
+}
+
+function renderRecent() {
+  const items = state.library.slice(0, 4);
+  $("#recent").innerHTML = items.map((it) => cardHtml(it, true)).join("");
+  $("#recent-empty").hidden = items.length > 0;
+}
+
+function collections() {
+  const m = new Map();
+  for (const it of state.library) if (it.collection) m.set(it.collection, (m.get(it.collection) || 0) + 1);
+  return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+function renderRail() {
+  $("#c-all").textContent = state.library.length || "";
+  $("#rail-colls").innerHTML = collections()
+    .map(([name, n]) => `<button class="rail-item" data-coll="${esc(name)}" title="${esc(name)}"><span>${esc(name)}</span><span class="count">${n}</span></button>`)
+    .join("");
+  $("#coll-names").innerHTML = collections().map(([n]) => `<option value="${esc(n)}">`).join("");
+  $$(".rail-item").forEach((b) => b.classList.toggle("on", b.dataset.coll === state.coll));
+}
+
+function libraryItems() {
+  const q = $("#lib-filter").value.trim().toLowerCase();
+  let items = state.library;
+  if (state.coll === "__recent") items = items.filter((it) => it.played).sort((a, b) => b.played - a.played).slice(0, 30);
+  else if (state.coll === "__loose") items = items.filter((it) => !it.collection);
+  else if (state.coll !== "__all") items = items.filter((it) => it.collection === state.coll);
+  if (q) {
+    items = items.filter((it) => {
+      const i = it.info || {};
+      const hay = [it.name, i.song, i.artist, i.album, i.year, i.genre, it.channel, it.collection, i.key, i.tuning, ...(i.chords || []),
+        i.capo != null ? `capo ${i.capo}` : "", i.tempo ? `${i.tempo} bpm` : ""].join(" ").toLowerCase();
+      return q.split(/\s+/).every((w) => hay.includes(w));
+    });
+  }
+  const key = (it) => (state.sort === "artist" ? it.info?.artist : it.info?.song || it.name) || "~";
+  if (state.sort !== "recent" && state.coll !== "__recent") items = [...items].sort((a, b) => key(a).localeCompare(key(b), undefined, { sensitivity: "base" }));
+  return items;
+}
+
+function renderLibrary() {
+  const items = libraryItems();
+  const titles = { __all: "All songs", __recent: "Played recently", __loose: "Not in a collection" };
+  $("#lib-title").textContent = titles[state.coll] || state.coll;
+  const ul = $("#library");
+  ul.className = `cards ${state.view === "list" ? "list" : ""}`;
+  ul.innerHTML = items.map((it) => cardHtml(it, false)).join("");
+  $("#library-empty").hidden = state.library.length > 0;
+  $("#library-nomatch").hidden = !(state.library.length && !items.length);
+  $$("#lib-sort button").forEach((b) => b.classList.toggle("on", b.dataset.sort === state.sort));
+  $$("#lib-view button").forEach((b) => b.classList.toggle("on", b.dataset.view === state.view));
+}
+
+$("#lib-filter").addEventListener("input", renderLibrary);
+$("#lib-sort").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (b) { state.sort = b.dataset.sort; renderLibrary(); }
+});
+$("#lib-view").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  state.view = b.dataset.view;
+  try { localStorage.setItem("tabz.libview", state.view); } catch {}
+  renderLibrary();
+});
+$(".lib-rail").addEventListener("click", (e) => {
+  const b = e.target.closest(".rail-item");
+  if (!b) return;
+  state.coll = b.dataset.coll;
+  renderRail();
+  renderLibrary();
+});
+
+const findItem = (key) => state.library.find((x) => (x.song || x.path) === key);
+
+function onCardClick(e) {
+  const card = e.target.closest(".card");
+  if (!card) return;
+  const it = findItem(card.dataset.key);
+  if (!it) return;
+  const menuBtn = e.target.closest("[data-card=menu]");
+  if (menuBtn) return openMenu(it, menuBtn);
+  if (it.song) openSong(it.song, state.screen);
+  else api().open_path(it.path);
+}
+$("#library").addEventListener("click", onCardClick);
+$("#recent").addEventListener("click", onCardClick);
+
+function openMenu(it, anchor) {
+  const m = $("#card-menu");
+  const items = [];
+  if (it.song) items.push(["play", "Open in reader"]);
+  if (it.song && it.editable) items.push(["review", "Review and edit"]);
+  if (it.path) items.push(["pdf", "Open PDF"], ["folder", "Show PDF in folder"]);
+  if (it.url) items.push(["video", "Watch on YouTube"]);
+  if (it.song) items.push(["-"], ["move", it.collection ? "Move to another collection" : "Add to a collection"]);
+  if (it.song && it.collection) items.push(["unfile", `Take out of “${it.collection}”`]);
+  if (it.song) items.push(["-"], ["delete", "Remove from library"]);
+  m.innerHTML = items.map(([k, label]) => (k === "-" ? "<hr>" : `<button data-m="${k}" class="${k === "delete" ? "danger" : ""}">${esc(label)}</button>`)).join("");
+  m.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const mw = m.offsetWidth, mh = m.offsetHeight;
+  m.style.left = `${Math.max(8, Math.min(r.right - mw, innerWidth - mw - 8))}px`;
+  m.style.top = `${r.bottom + mh + 6 > innerHeight ? r.top - mh - 6 : r.bottom + 6}px`;
+  m.onclick = async (e) => {
+    const k = e.target.closest("[data-m]")?.dataset.m;
+    if (!k) return;
+    m.hidden = true;
+    const name = it.info?.song || it.name;
+    if (k === "play") openSong(it.song, state.screen);
+    if (k === "review") openReview(it.song);
+    if (k === "pdf") api().open_path(it.path);
+    if (k === "folder") api().show_in_folder(it.path);
+    if (k === "video") api().open_url(it.url);
+    if (k === "move") {
+      const v = await ask(`Collection for “${name}”`, { input: it.collection || "", ok: "Move" });
+      if (v) { await api().set_song(it.song, { collection: v }); refreshLibrary(); }
+    }
+    if (k === "unfile") { await api().set_song(it.song, { collection: null }); refreshLibrary(); }
+    if (k === "delete") {
+      if (await ask(`Remove “${name}” from your library? Its PDF stays in the folder.`, { ok: "Remove", danger: true })) {
+        await api().delete_song(it.song);
+        refreshLibrary();
+      }
+    }
+  };
+}
+document.addEventListener("pointerdown", (e) => {
+  if (!e.target.closest("#card-menu, [data-card=menu]")) $("#card-menu").hidden = true;
+});
+
+// ---- review --------------------------------------------------------------------------------
+async function openReview(sid) {
+  const r = await api().open_review(sid);
+  if (!r || r.error) return toast(r?.error || "Couldn't open that song.");
+  state.removed = new Set(r.strips.filter((s) => s.removed).map((s) => s.i));
+  $("#video-box").open = false;
+  $("#video-frame").innerHTML = "";
+  show("review");
+  applyReview(r);
+}
+
+function applyReview(r) {
+  state.review = r;
+  state.settings = { ...state.settings, ...r.settings };
+  $("#pages").classList.remove("busy");
+  renderReview();
+}
+
+$("#video-box").addEventListener("toggle", () => {
+  const id = ytId(state.review?.meta?.url);
+  $("#video-frame").innerHTML = $("#video-box").open && id
+    ? `<iframe src="https://www.youtube-nocookie.com/embed/${id}?rel=0" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>`
+    : "";
+});
+
 let measureCtx;
 function fitText(text, font, maxW) {
   measureCtx ||= document.createElement("canvas").getContext("2d");
@@ -386,15 +603,14 @@ function fitText(text, font, maxW) {
 function renderReview() {
   const r = state.review, box = $("#pages");
   $("#saved-name").textContent = r.name || "Nothing to save. Every strip is left out.";
-  $$(".saved .btn").forEach((b) => (b.disabled = !r.pdf));
+  $$('[data-action="open-pdf"], [data-action="show-pdf"]').forEach((b) => (b.disabled = !r.pdf));
   fillDetails(r.info || {});
   syncSegs();
 
-  const ul = $("#strips");
   $("#strip-count").textContent = `· ${r.strips.length}`;
-  ul.innerHTML = r.strips.map((s) => `
+  $("#strips").innerHTML = r.strips.map((s) => `
     <li class="${state.removed.has(s.i) ? "out" : ""}" data-i="${s.i}" title="${state.removed.has(s.i) ? "Put this strip back" : "Leave this strip out"}">
-      <img alt="" src="${s.src}">
+      <img alt="" src="${s.src}" loading="lazy">
       <span class="when"><span>${clock(s.t0)}–${clock(s.t1)}</span><span>${s.screens > 1.3 ? `${s.screens} screens, scrolled` : ""}</span></span>
     </li>`).join("");
 
@@ -404,7 +620,7 @@ function renderReview() {
   if (!P || !r.rows.length) return;
   const pageW = Math.min(720, box.clientWidth - 56);
   const k = pageW / P.w, M = P.margin, cw = P.w - 2 * M;
-  const meta = state.meta || {}, info = r.info || {};
+  const meta = r.meta || {}, info = r.info || {};
   let page, y, n = 1;
   const px = (v) => `${v * k}px`;
   const newPage = () => {
@@ -475,19 +691,15 @@ function renderReview() {
 function fillDetails(i) {
   const f = $("#details");
   if (f.contains(document.activeElement)) return;     // don't stomp on typing
-  f.song.value = i.song || "";
-  f.artist.value = i.artist || "";
+  for (const k of ["song", "artist", "album", "tuning", "key"]) f[k].value = i[k] || "";
   f.capo.value = i.capo ?? "";
-  f.tuning.value = i.tuning || "";
-  f.key.value = i.key || "";
   f.tempo.value = i.tempo || "";
   f.chords.value = (i.chords || []).join(" ");
   $("#key-guess").hidden = !i.key_guessed;
 }
 
 $("#details").addEventListener("change", (e) => {
-  const name = e.target.name;
-  if (name) push({ info: { [name]: e.target.value } });
+  if (e.target.name) push({ info: { [e.target.name]: e.target.value } });
 });
 $("#details").addEventListener("submit", (e) => { e.preventDefault(); document.activeElement.blur(); });
 
@@ -509,7 +721,7 @@ function syncSegs() {
 let pushing = Promise.resolve();
 function push(changes) {
   $("#pages").classList.add("busy");
-  pushing = pushing.then(() => api().update(changes));
+  pushing = pushing.then(() => api().update(changes)).then((r) => r && state.screen === "review" && applyReview(r));
 }
 
 $$(".review .seg").forEach((seg) =>
@@ -527,25 +739,38 @@ $$(".review .seg").forEach((seg) =>
 );
 window.addEventListener("resize", () => state.screen === "review" && renderReview());
 
-// ---- actions ---------------------------------------------------------------------------------------
+// ---- actions -----------------------------------------------------------------------------------
 document.addEventListener("click", async (e) => {
   const a = e.target.closest("[data-action], [data-go]");
   if (!a) return;
   e.preventDefault();
   if (a.dataset.go) return go(a.dataset.go);
   const act = a.dataset.action;
-  if (act === "open-pdf") api().open_path(state.review.pdf);
-  if (act === "show-pdf") api().show_in_folder(state.review.pdf);
-  if (act === "open-folder") api().show_in_folder(null);
-  if (act === "play-current" && state.review?.song) openSong(state.review.song, "review");
+  const r = state.review;
+  if (act === "open-pdf" && r) api().open_path(r.pdf);
+  if (act === "show-pdf" && r) api().show_in_folder(r.pdf);
+  if (act === "play-current" && r) openSong(r.song, "review");
+  if (act === "review-done") {
+    await api().close_review();
+    state.review = null;
+    await refreshLibrary();
+    show(["area", "review", "play"].includes(state.prev) ? "library" : state.prev);
+  }
   if (act === "theme") toggleTheme();
-  if (act === "new") go("home");
 });
 
 $("#open-settings").onclick = () => {
   $("#out-dir").textContent = state.settings.out_dir;
   $("#out-dir").title = state.settings.out_dir;
+  $("#gemini-key").value = "";
+  $("#gemini-key").placeholder = state.settings.gemini_set ? "A key is saved. Paste a new one to replace it, or save empty to remove it." : "Paste a key from aistudio.google.com";
   $("#settings").hidden = false;
+};
+$("#save-key").onclick = async () => {
+  state.settings = await api().set_settings({ gemini_key: $("#gemini-key").value.trim() });
+  $("#gemini-key").value = "";
+  toast(state.settings.gemini_set ? "Gemini key saved. New songs will use it." : "Gemini key removed.");
+  $("#open-settings").click();
 };
 $("#close-settings").onclick = () => { $("#settings").hidden = true; refreshLibrary(); };
 $("#settings").addEventListener("click", (e) => { if (e.target.id === "settings") e.target.hidden = true; });
@@ -555,7 +780,7 @@ $("#pick-folder").onclick = async () => {
 };
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { $("#settings").hidden = true; $("#confirm").hidden = true; }
+  if (e.key === "Escape") { $("#settings").hidden = true; $("#card-menu").hidden = true; toggleQueue(false); }
   const typing = e.target.matches?.("input, select, textarea");
   if (!typing && (e.key === "d" || e.key === "D") && !e.ctrlKey && !e.metaKey) toggleTheme();
 });
@@ -564,6 +789,7 @@ window.addEventListener("pywebviewready", async () => {
   state.settings = await api().get_settings();
   await document.fonts.ready;
   await refreshLibrary();
+  handlers.jobs(await api().jobs());
   show("home");
   $("#url").focus();
 });

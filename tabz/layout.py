@@ -39,23 +39,65 @@ class Piece:
         return self.x1 - self.x0
 
 
-def redraw_staves(img, sp):
-    """Draw every detected staff line solid. Some renderers draw 1px grey lines that come
-    out faint or broken after cleaning; since we know where the lines are, re-ink them so
-    every source prints equally crisp. Notation staves above the tab get the same."""
+def fit_staff(img, sp, n):
+    """Where exactly n evenly spaced lines sit, at close to spacing sp: (y_first, spacing).
+
+    Looking for "any group of lines" gives 5 of 6 on a busy strip, or 7 when a border sits
+    one gap away, and each miss shifts that strip against its neighbours. Fitting a comb
+    of exactly n lines, and penalising ink one gap outside it, doesn't drift that way.
+    """
+    m = cv2.morphologyEx(img, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp * 0.9), 1)))
+    prof = m.mean(axis=1)
+    prof = np.maximum(prof, np.maximum(np.r_[0, prof[:-1]], np.r_[prof[1:], 0]))   # allow 1px wobble
+    H = len(prof)
+    best, best_score = None, -1e9
+    for s in np.linspace(sp * 0.92, sp * 1.08, 17):
+        span = (n - 1) * s
+        ys = np.arange(0, H - span - 1, 1.0)
+        if not len(ys):
+            continue
+        idx = (ys[:, None] + np.arange(n)[None, :] * s).round().astype(int)
+        score = prof[idx].min(axis=1) * 0.5 + prof[idx].mean(axis=1)    # every line must be there
+        outside = []
+        for k in (-1, n):
+            o = (ys + k * s).round().astype(int)
+            outside.append(np.where((o >= 0) & (o < H), prof[np.clip(o, 0, H - 1)], 0))
+        score -= 0.6 * np.maximum(*outside)
+        i = int(np.argmax(score))
+        if score[i] > best_score:
+            best, best_score = (float(ys[i]), float(s)), score[i]
+    return best if best and best_score > 0.15 else None
+
+
+def redraw_staves(img, sp, tab=None):
+    """Draw staff lines solid. Some renderers draw 1px grey lines that come out faint or
+    broken after cleaning; since we know where the lines are, re-ink them so every source
+    prints equally crisp. tab=(y_first, spacing, n) is the fitted tab staff; other clean
+    5-line groups (a notation staff above) get the same treatment."""
     m = cv2.morphologyEx(img, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp * 0.9), 1)))
     out = img.copy()
     thick = 1 if sp < 22 else 2
-    for y0, y1, gsp, n in staff_groups(row_peaks(m.mean(axis=1), 0.25, sp * 0.35)):
-        for y in np.linspace(y0, y1, n):
-            y = int(round(y))
-            row = m[max(0, y - 1):y + 2].max(axis=0) > 0.2
-            # only along stretches where the line really runs, not across gaps between systems
-            edges = np.flatnonzero(np.diff(np.r_[0, row.astype(np.int8), 0]))
-            for a, b in zip(edges[::2], edges[1::2]):
-                if b - a >= sp * 2:
-                    band = out[max(0, y - thick // 2):y - thick // 2 + thick, a:b]
-                    np.maximum(band, 0.92, out=band)
+    lines = []
+    if tab:
+        y0, gap, n = tab
+        lines += [y0 + k * gap for k in range(n)]
+        lo, hi = y0 - gap * 0.6, y0 + gap * (n - 0.4)
+    else:
+        lo = hi = -1
+    for g0, g1, gsp, gn in staff_groups(row_peaks(m.mean(axis=1), 0.25, sp * 0.35)):
+        if gn == 5 and (g1 < lo or g0 > hi):                    # notation, clear of the tab
+            lines += list(np.linspace(g0, g1, gn))
+    for y in lines:
+        y = int(round(y))
+        if not 0 <= y < img.shape[0]:
+            continue
+        row = m[max(0, y - 1):y + 2].max(axis=0) > 0.2
+        # only along stretches where the line really runs, not across gaps between systems
+        edges = np.flatnonzero(np.diff(np.r_[0, row.astype(np.int8), 0]))
+        for a, b in zip(edges[::2], edges[1::2]):
+            if b - a >= sp * 2:
+                band = out[max(0, y - thick // 2):y - thick // 2 + thick, a:b]
+                np.maximum(band, 0.92, out=band)
     return out
 
 
@@ -84,18 +126,23 @@ def despeckle(img, sp):
 
 
 class StripInfo:
-    def __init__(self, img, color, sp_hint):
-        img = despeckle(redraw_staves(img, sp_hint), sp_hint)
-        self.img = img          # ink 0..1
+    def __init__(self, img, color, sp_hint, n=None):
+        fit = fit_staff(img, sp_hint, n) if n else None
+        if fit:
+            self.y_first, self.sp = fit
+            self.y_last = self.y_first + (n - 1) * self.sp
+        else:   # line count unknown (older saves): fall back to the best group found
+            m = cv2.morphologyEx(img, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp_hint * 0.9), 1)))
+            groups = staff_groups(row_peaks(m.mean(axis=1), 0.45, sp_hint * 0.6))
+            groups = [g for g in groups if abs(g[2] - sp_hint) < sp_hint * 0.25] or groups
+            if groups:
+                g = max(groups, key=lambda g: g[3])
+                self.y_first, self.y_last, self.sp = g[0], g[1], g[2]
+            else:
+                self.y_first, self.y_last, self.sp = img.shape[0] * 0.3, img.shape[0] * 0.8, sp_hint
+        n_lines = n or int(round((self.y_last - self.y_first) / self.sp)) + 1
+        self.img = despeckle(redraw_staves(img, sp_hint, (self.y_first, self.sp, n_lines)), sp_hint)
         self.color = color      # BGR uint8 or None
-        m = cv2.morphologyEx(img, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp_hint * 0.9), 1)))
-        groups = staff_groups(row_peaks(m.mean(axis=1), 0.45, sp_hint * 0.6))
-        groups = [g for g in groups if abs(g[2] - sp_hint) < sp_hint * 0.25] or groups
-        if groups:
-            g = max(groups, key=lambda g: g[3])
-            self.y_first, self.y_last, self.sp = g[0], g[1], g[2]
-        else:  # shouldn't happen (scan only keeps frames with a staff), but don't crash
-            self.y_first, self.y_last, self.sp = img.shape[0] * 0.3, img.shape[0] * 0.8, sp_hint
         self.top, self.bottom = self._content_rows()
         self.cuts = self._cut_points()
         self.x_start, self.x_end = self._content_cols()
@@ -229,10 +276,10 @@ def auto_per_row(sp, unit, content_w=A4[0] - 80):
     return int(max(1, min(3, content_w * sp / (MIN_GAP_PT * unit))))
 
 
-def build_rows(strips, screen_w, per_row="auto", keep_color=False):
+def build_rows(strips, screen_w, per_row="auto", keep_color=False, n=None):
     """strips: [(ink_img, color_img_or_None, sp)]. screen_w: width of the cropped box in
     source pixels. per_row: how many screen-widths of tab fit across one row."""
-    infos = [StripInfo(img, col, sp) for img, col, sp in strips]
+    infos = [StripInfo(img, col, sp, n) for img, col, sp in strips]
     sp_ref = float(np.median([i.sp for i in infos]))
     for i in infos:
         i.norm = sp_ref / i.sp
@@ -245,24 +292,24 @@ def build_rows(strips, screen_w, per_row="auto", keep_color=False):
     return [render_row(r, sp_ref, gap, keep_color) for r in rows], row_px
 
 
-def label_bands(images, sp):
+def label_bands(images, sp, n=None):
     """The rows above each staff where chord names and tempo marks live. Stops half a
     string-gap above the top line so string labels drawn on the lines stay out."""
     out = []
     for img in images:
-        i = StripInfo(img, None, sp)
+        i = StripInfo(img, None, sp, n)
         out.append(i.img[i.top:max(i.top + 1, int(i.y_first - 0.5 * i.sp))])
     return out
 
 
-def segments(strips, screen_w):
+def segments(strips, screen_w, n=None):
     """Units for the Play view, which reflows them to any width.
 
     Scrolled strips are cut into single bars so lines can break anywhere a bar ends.
     Swapped pages stay whole. Everything is scaled to one string spacing.
     Returns ([{"img", "staff_y", "group", "kind"}], unit_px, sp_ref).
     """
-    infos = [StripInfo(img, None, sp) for img, sp in strips]
+    infos = [StripInfo(img, None, sp, n) for img, sp in strips]
     sp_ref = float(np.median([i.sp for i in infos]))
     out = []
     for g, i in enumerate(infos):

@@ -104,6 +104,10 @@ def parse_title(title, channel=""):
     parts = title_parts(title, channel)
     if not parts:
         return title.strip(), ""
+    by = [re.match(r"(.+?)\s+by\s+(.+)$", p, re.I) for p in parts]
+    by = next((m for m in by if m), None)
+    if by:                                                       # "PASILYO by Sunkissed Lola"
+        return by.group(1).strip(), by.group(2).strip()
     if len(parts) == 1:
         m = re.match(r"(.+?)\s*\(([^()]+)\)$", parts[0])      # "Love Story (Taylor Swift)"
         return (m.group(1), m.group(2)) if m else (parts[0], "")
@@ -355,16 +359,83 @@ def sounding_key(key, capo):
 
 # ---- all together ---------------------------------------------------------------------
 
-def song_info(video_path, title, channel="", description=""):
-    """Everything we can get before scanning: song, artist, capo, tuning, key, tempo."""
+def song_info(video_path, title, channel="", description="", gemini_key=None):
+    """Everything we can get before scanning: song, artist, album, capo, tuning, key, tempo.
+
+    Text on screen wins for playing details, since it describes this exact arrangement.
+    With a Gemini key, the model reads the title and description too; without one the
+    regex and lookup path below covers the same ground less flexibly.
+    """
     song, artist = parse_title(title, channel)
-    found = lookup(title, channel) or {}
     screen = facts_from_text(_frame_lines(video_path))
     desc = facts_from_text((description or "").splitlines())
-    facts = {k: screen[k] if screen[k] is not None else desc[k] for k in screen}
+    ai = gemini(gemini_key, title, channel, description) if gemini_key else {}
+    if ai.get("song") and ai.get("artist"):
+        song, artist = ai["song"], ai["artist"]
+    found = lookup(f"{song} - {artist}" if artist else title, channel) or lookup(title, channel) or {}
+    facts = {}
+    for k in ("capo", "tuning", "key", "tempo"):
+        facts[k] = next((v for v in (screen[k], ai.get(k), desc[k]) if v not in (None, "")), None)
     return {"song": found.get("song") or song, "artist": found.get("artist") or artist,
             "album": found.get("album"), "year": found.get("year"), "genre": found.get("genre"),
-            "artwork": found.get("artwork"), **facts, "chords": [], "key_guessed": False}
+            "artwork": found.get("artwork"), **facts, "chords": [], "key_guessed": False,
+            "arranger": ai.get("arranger") or channel or None}
+
+
+GEMINI_MODEL = "gemini-flash-latest"
+GEMINI_PROMPT = """You read YouTube guitar tab videos' titles and descriptions and pull out facts.
+Return JSON with these keys, null when the text doesn't say:
+  song      the song's real title, no "fingerstyle", "tab", "cover" or channel names
+  artist    the original artist (not the person who made the tab)
+  arranger  who made this arrangement or video, if stated
+  capo      fret number as an integer, 0 for "no capo"
+  tuning    short name like "Standard", "Drop D", "DADGAD", "Half step down"
+  key       like "D" or "Em", only if stated
+  tempo     beats per minute as an integer, only if stated
+Only use what the text says. Do not guess."""
+
+
+def gemini(key, title, channel, description):
+    """Ask Gemini to read the title and description. {} on any failure: the app never
+    depends on it."""
+    import json as _json
+    import urllib.request
+    text = f"Title: {title}\nChannel: {channel}\nDescription:\n{(description or '')[:4000]}"
+    body = {
+        "systemInstruction": {"parts": [{"text": GEMINI_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": text}]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
+    }
+    req = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+        data=_json.dumps(body).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            out = _json.load(r)
+        raw = out["candidates"][0]["content"]["parts"][0]["text"]
+        d = _json.loads(raw)
+    except Exception:
+        return {}
+    clean = {}
+    for k in ("song", "artist", "arranger", "tuning", "key"):
+        if isinstance(d.get(k), str) and d[k].strip():
+            clean[k] = d[k].strip()[:120]
+    for k, lo, hi in (("capo", 0, 12), ("tempo", 30, 300)):
+        try:
+            v = int(d.get(k))
+            if lo <= v <= hi:
+                clean[k] = v
+        except (TypeError, ValueError):
+            pass
+    return clean
+
+
+def file_name(meta):
+    """"Song - Artist" when we know them, else the video title."""
+    i = meta.get("info") or {}
+    if i.get("song") and i.get("artist"):
+        return f"{i['song']} - {i['artist']}"
+    return i.get("song") or meta["title"]
 
 
 def add_strip_info(info, bands, sp):
@@ -417,6 +488,7 @@ if __name__ == "__main__":
     assert p("Love Story (Taylor Swift) - Easy Beginner Ukulele Tab With Play Along") == ("Love Story", "Taylor Swift")
     assert p("Fur Elise - Beethoven (Simple Guitar Tab)", "Simple Guitar Tabs") == ("Fur Elise", "Beethoven")
     assert p("Arctic Monkeys - Do I Wanna Know (bass cover with tabs in video)") == ("Arctic Monkeys", "Do I Wanna Know")
+    assert p("PASILYO by Sunkissed Lola | Fingerstyle Guitar Tab") == ("PASILYO", "Sunkissed Lola")
 
     g = guess_key
     assert g([("D", 24), ("Bm7", 24), ("A", 17), ("A6", 6), ("G", 5)]) == "D"

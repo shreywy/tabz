@@ -21,12 +21,14 @@ async function openSong(id, from) {
   const m = await api().load_song(id);
   if (!m) return;
   const i = m.info || {};
+  setFollow(false);
   play.song = m;
   play.from = from;
   play.page = 0;
   $("#play-title").textContent = i.song || m.title;
   $("#play-artist").textContent = [i.artist, m.notes].filter(Boolean).join("  ·  ");
   $("#bpm").value = m.bpm || i.tempo || 80;
+  play.baseBpm = i.tempo || Number($("#bpm").value);
   $("#beats").value = String(m.beats || 4);
   metro.setBeats(Number($("#beats").value));
   renderInfo();
@@ -191,15 +193,56 @@ $("#view-mode").addEventListener("click", (e) => {
   layoutSheet();
 });
 
-function leavePlay() {
+function leavePlay(silent) {
   metro.stop();
+  setFollow(false);
   if (document.body.classList.contains("full")) toggleFull();
   document.body.classList.remove("playing");
   $("#metro-pop").hidden = true;
+  if (silent) return;                    // navigating somewhere else already
   if (play.from === "review" && state.review) show("review");
-  else if (play.from === "library") { show("library"); refreshLibrary(); }
-  else { show("home"); refreshLibrary(); }
+  else if (play.from === "home") { show("home"); refreshLibrary(); }
+  else { show("library"); refreshLibrary(); }
 }
+
+// ---- follow: move through the song by itself ------------------------------------------
+// Paced by how long the tab was on screen in the video, scaled by the tempo you set
+// against the song's own tempo. Scroll mode glides; Pages mode turns pages.
+function setFollow(on) {
+  play.follow = on;
+  $("#follow").classList.toggle("on", on);
+  cancelAnimationFrame(play.followRaf);
+  if (!on || !play.song) return;
+  play.followLast = performance.now();
+  play.pageClock = 0;
+  const step = (now) => {
+    if (!play.follow) return;
+    const dt = (now - play.followLast) / 1000;
+    play.followLast = now;
+    const m = play.song;
+    const base = m.info?.tempo || play.baseBpm || metro.bpm();
+    const span = (m.span || m.duration || 180) * (base / metro.bpm());   // seconds for the whole song
+    const v = $("#sheet");
+    if (play.mode === "pages") {
+      play.pageClock += dt;
+      if (play.pageClock >= span / Math.max(1, play.pages.length)) {
+        play.pageClock = 0;
+        if (play.page < play.pages.length - 1) turn(1);
+        else return setFollow(false);
+      }
+    } else {
+      const total = v.scrollHeight - v.clientHeight;
+      play.followPos = (play.followPos ?? v.scrollTop) + (total / span) * dt;
+      if (Math.abs(play.followPos - v.scrollTop) > 40) play.followPos = v.scrollTop;   // the user scrolled
+      v.scrollTop = play.followPos;
+      if (v.scrollTop >= total - 1) return setFollow(false);
+    }
+    play.followRaf = requestAnimationFrame(step);
+  };
+  play.followPos = null;
+  play.followRaf = requestAnimationFrame(step);
+}
+$("#follow").onclick = () => setFollow(!play.follow);
 
 function toggleFull() {
   document.body.classList.toggle("full");
@@ -404,6 +447,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "f" || k === "F") toggleFull();
   else if (k === "t" || k === "T") tap();
   else if (k === "i" || k === "I") toggleInfo();
+  else if (k === "g" || k === "G") setFollow(!play.follow);
   else if (k === "ArrowUp" || k === "ArrowDown") {
     e.preventDefault();
     $("#bpm").value = metro.bpm() + (k === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 5 : 1);
