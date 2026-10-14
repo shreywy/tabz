@@ -1,0 +1,355 @@
+"""Find the tab strip in a video frame, clean it to black-on-white, and track it over time.
+
+Nothing here knows about specific channels. Everything is driven by two generic facts:
+tab is a group of 4-7 evenly spaced horizontal lines, and ink is thin marks that
+contrast with whatever flat background sits behind them.
+"""
+import cv2
+import numpy as np
+
+
+def luminance(bgr):
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+
+def _odd(n):
+    n = max(3, int(round(n)))
+    return n if n % 2 else n + 1
+
+
+def thin_marks(gray, k):
+    """Strength of thin dark-on-light and light-on-dark marks, each in 0..255."""
+    kern = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+    dark = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kern) - gray
+    light = gray - cv2.morphologyEx(gray, cv2.MORPH_OPEN, kern)
+    return dark, light
+
+
+def horizontal_rows(mask, min_len_frac=0.12, bridge=15):
+    """Fraction of each row covered by long horizontal runs in a binary mask."""
+    h, w = mask.shape
+    m = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (bridge, 1)))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(20, int(w * min_len_frac)), 1)))
+    return m.sum(axis=1) / 255.0 / w, m
+
+
+def line_centers(coverage, thresh):
+    """Merge runs of rows above thresh into line centre positions."""
+    on = coverage > thresh
+    lines, y = [], 0
+    while y < len(on):
+        if on[y]:
+            y0 = y
+            while y < len(on) and on[y]:
+                y += 1
+            lines.append((y0 + y - 1) / 2.0)
+        y += 1
+    return lines
+
+
+def row_peaks(profile, thresh, min_dist):
+    """Strongest rows above thresh, at least min_dist apart. A string with lots of notes
+    on it spreads ink into neighbouring rows; this keeps just its centre."""
+    peaks = []
+    for i in np.argsort(profile)[::-1]:
+        if profile[i] < thresh:
+            break
+        if all(abs(i - p) >= min_dist for p in peaks):
+            peaks.append(int(i))
+    return sorted(float(p) for p in peaks)
+
+
+def staff_groups(lines, min_n=4, max_n=7, tol=0.1, min_gap=5):
+    """Find runs of 4..7 evenly spaced lines. Returns [(first, last, spacing, count)]."""
+    groups, i = [], 0
+    while i < len(lines) - 1:
+        best = None
+        for j in range(i + 1, len(lines)):
+            n = j - i + 1
+            gaps = np.diff(lines[i:j + 1])
+            sp = gaps.mean()
+            if sp < min_gap or gaps.max() > sp * (1 + tol) or gaps.min() < sp * (1 - tol):
+                break
+            if min_n <= n <= max_n:
+                best = (lines[i], lines[j], float(sp), n)
+        if best:
+            groups.append(best)
+            i += best[3]
+        else:
+            i += 1
+    return groups
+
+
+def find_staves(bgr):
+    """Tab staves in a frame: [(y_first, y_last, spacing, n, x0, x1)]."""
+    gray = luminance(bgr)
+    dark, light = thin_marks(gray, 9)
+    mask = ((np.maximum(dark, light) > 30) * 255).astype(np.uint8)
+    cov, hm = horizontal_rows(mask)
+    lines = line_centers(cov, 0.25)
+    out = []
+    for y0, y1, sp, n in staff_groups(lines):
+        ext = [np.nonzero(hm[int(y)])[0] for y in np.linspace(y0, y1, n)]
+        ext = [e for e in ext if len(e)]
+        x0 = int(np.median([e.min() for e in ext]))
+        x1 = int(np.median([e.max() for e in ext]))
+        out.append((y0, y1, sp, n, x0, x1))
+    return out
+
+
+def read_frame(cap, t):
+    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+    ok, f = cap.read()
+    return f if ok else None
+
+
+def video_duration(cap):
+    return cap.get(cv2.CAP_PROP_FRAME_COUNT) / (cap.get(cv2.CAP_PROP_FPS) or 30)
+
+
+def vote_staff(path, box=None, samples=24):
+    """The staff that shows up in the most sampled frames: (y0, y1, spacing, n, x0, x1).
+    With a box, coordinates are relative to it. None if no frame has tab lines."""
+    cap = cv2.VideoCapture(path)
+    dur = video_duration(cap)
+    found = []
+    for t in np.linspace(dur * 0.08, dur * 0.92, samples):
+        f = read_frame(cap, t)
+        if f is not None:
+            if box:
+                x, y, w, h = box
+                f = f[y:y + h, x:x + w]
+            found += find_staves(f)
+    cap.release()
+    if not found:
+        return None
+
+    def near(o, s):
+        return abs(o[0] - s[0]) < s[2] / 2 and abs(o[2] - s[2]) < s[2] * 0.15
+    best = max(found, key=lambda s: sum(near(o, s) for o in found))
+    same = [o for o in found if near(o, best)]
+    med = lambda i: float(np.median([o[i] for o in same]))
+    return med(0), med(1), med(2), int(round(med(3))), int(med(4)), int(med(5))
+
+
+def guess_region(path):
+    """Best guess at the tab box as (x, y, w, h), or None."""
+    staff = vote_staff(path)
+    if not staff:
+        return None
+    y0, y1, sp, _, x0, x1 = staff
+    cap = cv2.VideoCapture(path)
+    dur = video_duration(cap)
+    cap.release()
+    return grow_box(luminance(_median_frame(path, dur)), x0, x1, y0, y1, sp)
+
+
+def _median_frame(path, dur, n=9):
+    """Per-pixel median of a few frames: the static overlay stays, the player mostly drops out."""
+    cap = cv2.VideoCapture(path)
+    frames = [read_frame(cap, t) for t in np.linspace(dur * 0.2, dur * 0.8, n)]
+    cap.release()
+    return np.median(np.stack([f for f in frames if f is not None]), axis=0).astype(np.uint8)
+
+
+def grow_box(gray, x0, x1, y0, y1, sp):
+    """Grow outward from the staff while rows/columns look like the staff's own background.
+
+    Stops at panel edges, title bars, borders. Caps keep it from running off on plain videos.
+    """
+    H, W = gray.shape
+    inner = gray[int(y0):int(y1), x0:x1]
+    bg = np.median(inner)
+
+    def plain(strip):
+        return abs(np.median(strip) - bg) < 28
+
+    # start half a string-gap outside the staff so thick lines don't stop us at once
+    top = int(y0 - sp / 2)
+    while top > 0 and y0 - top < 4.2 * sp and plain(gray[top - 1, x0:x1]):
+        top -= 1
+    bot = int(y1 + sp / 2)
+    while bot < H - 1 and bot - y1 < 2.6 * sp and plain(gray[bot + 1, x0:x1]):
+        bot += 1
+    left = x0
+    while left > 0 and x0 - left < 3 * sp and plain(gray[top:bot, left - 1]):
+        left -= 1
+    right = x1
+    while right < W - 1 and right - x1 < 1.5 * sp and plain(gray[top:bot, right + 1]):
+        right += 1
+    return (left, top, right - left + 1, bot - top + 1)
+
+
+def ink(bgr, sp):
+    """Ink strength 0..1 for a cropped strip: thin marks against the local flat background.
+
+    Highlight boxes, panels and gradients are wider than any stroke, so the morphological
+    background swallows them; digits, lines and symbols survive in either polarity.
+    Coloured notes count as ink because only their contrast matters, not their hue.
+    """
+    gray = luminance(bgr)
+    k = _odd(sp * 0.45)
+    kern = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+    if np.median(gray) > 110:            # light paper, dark ink
+        bg = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kern)
+        r = (bg - gray) / np.maximum(bg, 40)
+    else:                                # dark panel, light ink
+        bg = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kern)
+        r = (gray - bg) / np.maximum(255 - bg, 40)
+    return np.clip((r - 0.12) / 0.3, 0, 1).astype(np.float32)
+
+
+def has_staff(ink_img, sp):
+    """Is there a tab staff in this cleaned strip, at roughly the expected string spacing?
+
+    Rows are smeared sideways first so busy bars (arpeggio marks, stacked chords) don't
+    break the lines up. Position isn't fixed: some videos redraw each page slightly
+    bigger or lower.
+    """
+    m = cv2.morphologyEx(ink_img, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp * 0.9), 1)))
+    groups = staff_groups(row_peaks(m.mean(axis=1), 0.45, sp * 0.6))
+    return any(abs(g[2] - sp) < sp * 0.2 for g in groups)
+
+
+def staff_rows(ink_img, sp):
+    """Staff groups found in a cleaned strip (same tuple shape as staff_groups).
+    Dense bars chop string lines into short runs, so bridge gaps up to about a digit wide."""
+    cov, _ = horizontal_rows(((ink_img > 0.5) * 255).astype(np.uint8), min_len_frac=0.06, bridge=_odd(sp * 0.9))
+    return staff_groups(line_centers(cov, 0.3))
+
+
+def notes_only(ink_img, sp):
+    """Ink with long horizontal lines removed. Staff lines look the same at every
+    horizontal offset, so they'd make every shift look like a match."""
+    m = (ink_img * 255).astype(np.uint8)
+    # bridge dash gaps first so ASCII "------" counts as a line too
+    joined = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp * 0.4), 1)))
+    lines = cv2.morphologyEx(joined, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp * 3), 1)))
+    return cv2.subtract(m, cv2.dilate(lines, np.ones((3, 1), np.uint8))).astype(np.float32) / 255
+
+
+class Strip:
+    """A growing canvas. Each accepted frame adds its ink at an x offset; the final image
+    keeps ink seen in most frames, so playheads and other moving marks drop out."""
+
+    def __init__(self, img, t):
+        self.sum = img.copy()
+        self.cnt = np.ones_like(img)
+        self.x = 0
+        self.t0 = self.t1 = t
+
+    def add(self, img, dx, t):
+        self.x += dx
+        h, w = img.shape
+        need = self.x + w - self.sum.shape[1]
+        if need > 0:
+            pad = np.zeros((h, need), np.float32)
+            self.sum = np.hstack([self.sum, pad]); self.cnt = np.hstack([self.cnt, pad])
+        self.sum[:, self.x:self.x + w] += img
+        self.cnt[:, self.x:self.x + w] += 1
+        self.t1 = t
+
+    def image(self):
+        avg = self.sum / np.maximum(self.cnt, 1)
+        return np.clip((avg - 0.3) / 0.35, 0, 1)
+
+
+def match_shift(prev, cur, max_dy=4):
+    """How far content moved left from prev to cur. Returns (dx, score); dx is None if no lock.
+
+    Two windows: a wide one for small moves, a narrow one near the left edge so a jump of
+    up to ~3/4 of the strip (a whole page of bars sliding in) still overlaps.
+    """
+    h, w = cur.shape
+    best = (None, 0.0)
+    for a, b in ((0.12, 0.5), (0.03, 0.22)):
+        a, b = int(w * a), int(w * b)
+        tpl = cur[max_dy:h - max_dy, a:b]
+        if tpl.sum() < 20:              # nothing distinctive to lock on to
+            continue
+        res = cv2.matchTemplate(prev, tpl, cv2.TM_CCOEFF_NORMED)
+        _, score, _, (px, _) = cv2.minMaxLoc(res)
+        if score > best[1]:
+            best = (px - a, float(score))
+    if best[0] is not None:
+        # the window can lock on to things that never change (string labels, a logo);
+        # make sure the rest of the overlap agrees too
+        best = (best[0], min(best[1], overlap_score(prev, cur, best[0])))
+    return best
+
+
+def overlap_score(prev, cur, dx):
+    w = cur.shape[1]
+    if dx >= 0:
+        a, b = prev[:, dx:], cur[:, :w - dx]
+    else:
+        a, b = prev[:, :w + dx], cur[:, -dx:]
+    if a.shape[1] < w * 0.2:
+        return 0.0
+    a = cv2.GaussianBlur(a, (5, 5), 0).ravel(); b = cv2.GaussianBlur(b, (5, 5), 0).ravel()
+    a = a - a.mean(); b = b - b.mean()
+    d = np.sqrt((a * a).sum() * (b * b).sum())
+    return float((a * b).sum() / d) if d > 0 else 0.0
+
+
+# Measured on the test set: unchanged strips score ~0.99, swaps between similar-looking
+# strips reach ~0.64, so "same" needs a high bar. Scrolls blur a little, so they get less.
+SAME = 0.85
+SCROLL = 0.7
+
+
+def scan(path, region, fps=4.0, on_progress=None):
+    """Walk the video and return a list of Strip objects in playback order."""
+    x, y, w, h = region
+    cap = cv2.VideoCapture(path)
+    vfps = cap.get(cv2.CAP_PROP_FPS) or 30
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    step = max(1, round(vfps / fps))
+
+    staff = vote_staff(path, region)
+    if not staff:
+        return [], None
+    sp = staff[2]
+
+    strips, cur, ref, pending = [], None, None, None
+    i = 0
+    while True:
+        if not cap.grab():
+            break
+        if i % step:
+            i += 1
+            continue
+        ok, frame = cap.retrieve()
+        t = i / vfps
+        i += 1
+        if not ok:
+            continue
+        if on_progress and i % (step * 8) == 1:
+            on_progress(min(1.0, i / total))
+
+        img = ink(frame[y:y + h, x:x + w], sp)
+        if not has_staff(img, sp):
+            continue                     # intro, talking head, end screen
+        small = cv2.resize(notes_only(img, sp), None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+
+        if cur is not None:
+            dx, score = match_shift(ref, small)
+            if dx is not None and ((abs(dx) <= 2 and score >= SAME) or (dx > 2 and score >= SCROLL)):
+                dx = 0 if dx <= 2 else dx * 2      # back to full resolution
+                cur.add(img, dx, t)
+                ref, pending = small, None
+                continue
+        # no match: wait for the picture to settle before starting a new strip
+        if pending is not None:
+            dx, score = match_shift(pending[1], small)
+            if dx is not None and score >= SAME and abs(dx) <= 2:
+                cur = Strip(pending[0], pending[2])
+                cur.add(img, 0, t)
+                strips.append(cur)
+                ref, pending = small, None
+                continue
+        pending = (img, small, t)
+    cap.release()
+    if on_progress:
+        on_progress(1.0)
+    return strips, sp

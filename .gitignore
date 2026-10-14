@@ -1,0 +1,6 @@
+testdata/
+__pycache__/
+build/
+dist/
+*.pdf
+out/
