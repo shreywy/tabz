@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tabz</title>
+<link rel="icon" href="logo.svg">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#" data-go="home" aria-label="tabz home">
+    <img src="logo.svg" alt="" width="26" height="26">
+    <span>tab<em>z</em></span>
+  </a>
+  <ol class="steps" aria-label="Progress">
+    <li data-step="home"><b>01</b>Link</li>
+    <li data-step="area"><b>02</b>Area</li>
+    <li data-step="scan"><b>03</b>Scan</li>
+    <li data-step="review"><b>04</b>Review</li>
+  </ol>
+  <button class="icon-btn" id="open-settings" aria-label="Settings" title="Settings">
+    <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="5" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/><circle cx="13" cy="10" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="15" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/></svg>
+  </button>
+</header>
+
+<main>
+  <!-- 01 link -->
+  <section class="screen home" data-screen="home">
+    <div class="home-inner">
+      <h1>Tab from play-along videos</h1>
+      <p class="lede">Paste a YouTube link. tabz downloads the video, finds the tab on screen and saves every bar to one PDF.</p>
+      <form id="link-form" class="link" autocomplete="off">
+        <label for="url" class="sr">YouTube link</label>
+        <input id="url" type="url" required placeholder="https://www.youtube.com/watch?v=…" spellcheck="false">
+        <button type="submit" class="btn primary">Get tabs</button>
+      </form>
+      <p class="error" id="home-error" role="alert" hidden></p>
+
+      <div class="library">
+        <div class="library-head">
+          <h2>Saved</h2>
+          <button class="link-btn" data-action="open-folder">Open folder</button>
+        </div>
+        <ul id="library"></ul>
+        <p class="empty" id="library-empty">Nothing yet. Your PDFs will show up here.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- working: download / locate / scan -->
+  <section class="screen working" data-screen="working">
+    <div class="working-inner">
+      <p class="kicker" id="work-stage">Downloading</p>
+      <h2 id="work-title">Fetching video…</h2>
+      <p class="notes-line" id="work-notes" hidden></p>
+      <div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+        <div class="meter-fill" id="work-fill"></div>
+      </div>
+      <div class="work-foot">
+        <span id="work-detail"></span>
+        <span class="mono" id="work-pct">0%</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 area -->
+  <section class="screen area" data-screen="area">
+    <div class="area-main">
+      <div class="stage" id="stage">
+        <img id="frame" alt="Video frame">
+        <div class="crop" id="crop">
+          <i data-h="nw"></i><i data-h="n"></i><i data-h="ne"></i><i data-h="e"></i>
+          <i data-h="se"></i><i data-h="s"></i><i data-h="sw"></i><i data-h="w"></i>
+        </div>
+      </div>
+      <div class="scrub">
+        <span class="mono" id="scrub-time">0:00</span>
+        <input type="range" id="scrub" min="0" max="1000" value="500" aria-label="Position in video">
+        <span class="mono muted" id="scrub-dur">0:00</span>
+      </div>
+    </div>
+    <aside class="side">
+      <p class="kicker">Step 2</p>
+      <h2>Check the tab area</h2>
+      <p id="area-msg">The box is a guess. Drag it or its edges so it covers the string lines and the chord names above them. Scrub through the video to check it fits the whole way.</p>
+      <dl class="facts" id="area-facts"></dl>
+      <div class="side-actions">
+        <button class="btn primary" id="scan-btn">Scan video</button>
+        <button class="btn ghost" id="reset-box">Reset box</button>
+      </div>
+    </aside>
+  </section>
+
+  <!-- 04 review -->
+  <section class="screen review" data-screen="review">
+    <div class="pages" id="pages" aria-label="PDF preview"></div>
+    <aside class="side review-side">
+      <div class="saved">
+        <p class="kicker">Saved</p>
+        <p class="saved-name" id="saved-name"></p>
+        <div class="side-actions">
+          <button class="btn primary" data-action="open-pdf">Open PDF</button>
+          <button class="btn ghost" data-action="show-pdf">Show in folder</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <label class="group-label" for="notes">Header notes</label>
+        <input id="notes" class="field" placeholder="Capo 2 · Standard tuning">
+      </div>
+
+      <div class="group">
+        <span class="group-label">Per row</span>
+        <div class="seg" data-setting="per_row">
+          <button data-value="1">1</button><button data-value="2">2</button><button data-value="3">3</button>
+        </div>
+      </div>
+      <div class="group two">
+        <div>
+          <span class="group-label">Paper</span>
+          <div class="seg" data-setting="paper">
+            <button data-value="a4">A4</button><button data-value="letter">Letter</button>
+          </div>
+        </div>
+        <div>
+          <span class="group-label">Style</span>
+          <div class="seg" data-setting="keep_color">
+            <button data-value="false">Clean</button><button data-value="true">Original</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="group strips-group">
+        <span class="group-label">Strips <span class="muted" id="strip-count"></span></span>
+        <p class="hint">Click a strip to leave it out.</p>
+        <ul class="strips" id="strips"></ul>
+      </div>
+
+      <button class="btn ghost wide" data-action="new">New video</button>
+    </aside>
+  </section>
+</main>
+
+<div class="sheet-backdrop" id="settings" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <h2 id="settings-title">Settings</h2>
+    <div class="group">
+      <span class="group-label">Save PDFs to</span>
+      <div class="folder">
+        <code id="out-dir"></code>
+        <button class="btn ghost" id="pick-folder">Change</button>
+      </div>
+    </div>
+    <p class="hint">Layout options (per row, paper, style) are remembered from the last review.</p>
+    <div class="side-actions"><button class="btn primary" id="close-settings">Done</button></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

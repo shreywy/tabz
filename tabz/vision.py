@@ -301,7 +301,7 @@ SAME = 0.85
 SCROLL = 0.7
 
 
-def scan(path, region, fps=4.0, on_progress=None):
+def scan(path, region, fps=4.0, on_progress=None, on_strip=None):
     """Walk the video and return a list of Strip objects in playback order."""
     x, y, w, h = region
     cap = cv2.VideoCapture(path)
@@ -350,6 +350,8 @@ def scan(path, region, fps=4.0, on_progress=None):
                 cur = Strip(pending[0], pending[3], pending[2])
                 cur.add(img, crop, 0, t)
                 strips.append(cur)
+                if on_strip:
+                    on_strip(len(strips))
                 ref, pending = small, None
                 continue
         pending = (img, small, t, crop)

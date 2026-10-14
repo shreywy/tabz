@@ -17,12 +17,14 @@ from reportlab.pdfgen import canvas as pdfcanvas
 
 from .vision import _odd, row_peaks, staff_groups
 
-FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+FONT_DIR = os.path.join(os.path.dirname(__file__), "ui", "fonts")
 for name, file in (("Plex", "IBMPlexSans-Regular.ttf"), ("Plex-Medium", "IBMPlexSans-Medium.ttf"),
                    ("Plex-SemiBold", "IBMPlexSans-SemiBold.ttf"), ("PlexMono", "IBMPlexMono-Regular.ttf")):
     pdfmetrics.registerFont(TTFont(name, os.path.join(FONT_DIR, file)))
 
 PAPER = {"a4": A4, "letter": LETTER}
+MARGIN = 40     # page margin, points
+ROW_GAP = 14    # space between rows, points
 INK = 0x1c  # near-black reads softer than pure #000 on screen and prints the same
 
 
@@ -187,10 +189,10 @@ def build_rows(strips, screen_w, per_row=2, keep_color=False):
 def write_pdf(path, rows, row_px, meta, paper="a4"):
     """rows: images from build_rows. meta: title, url, channel, duration."""
     W, H = PAPER[paper]
-    margin = 40
+    margin = MARGIN
     content_w = W - 2 * margin
     pt = content_w / row_px                   # points per normalised pixel
-    row_gap = 14
+    row_gap = ROW_GAP
 
     c = pdfcanvas.Canvas(path, pagesize=(W, H))
     c.setTitle(meta["title"])
@@ -210,6 +212,12 @@ def write_pdf(path, rows, row_px, meta, paper="a4"):
     for line in _wrap(meta["title"], "Plex-SemiBold", 17, content_w)[:2]:
         y -= 20
         c.drawString(margin, y, line)
+    notes = meta.get("notes") or ""
+    if notes:
+        y -= 17
+        c.setFont("Plex-Medium", 10.5)
+        c.setFillGray(0.08)
+        c.drawString(margin, y, notes[:120])
     y -= 15
     c.setFont("Plex", 9)
     c.setFillGray(0.4)

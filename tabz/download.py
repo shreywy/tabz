@@ -49,4 +49,5 @@ def download(url, on_progress=None, dest=TEMP_DIR):
         "url": info.get("webpage_url") or url,
         "channel": info.get("channel") or info.get("uploader") or "",
         "duration": info.get("duration") or 0,
+        "description": info.get("description") or "",
     }
