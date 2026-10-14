@@ -478,3 +478,13 @@ body.playing .queue { top: 0; }
 .page-nav .next span { right: 6px; }
 .page-nav .pn:hover span { opacity: 1; }
 .field { height: 34px; padding: 0 10px; border: 1px solid var(--rule); border-radius: var(--r); background: var(--raised); color: var(--ink); width: 100%; }
+
+/* tempo: drag the number sideways */
+.bpm input { cursor: ew-resize; }
+.bpm input:focus { cursor: text; }
+body.dragging-bpm, body.dragging-bpm * { cursor: ew-resize !important; user-select: none; }
+
+/* side panels scroll; their sections keep their natural height instead of being squeezed */
+.side > * { flex-shrink: 0; }
+/* a scrolled strip can be dozens of screens wide: show its first screen, not a 2px sliver */
+.strips img { height: 56px; object-fit: cover; object-position: left center; }

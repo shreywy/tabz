@@ -126,3 +126,13 @@ def playlist(url):
         out.append({"url": f"https://www.youtube.com/watch?v={e['id']}", "title": title,
                     "ok": not bad, "reason": "Private or deleted" if bad else None})
     return res.get("title") or "Playlist", out
+
+
+def peek_title(url):
+    """The video's title without downloading it (about a second). None if it fails."""
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True,
+                               "skip_download": True, "extract_flat": True}) as ydl:
+            return (ydl.extract_info(url, download=False) or {}).get("title")
+    except Exception:
+        return None

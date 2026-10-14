@@ -1,5 +1,10 @@
-"""Background queue: videos are processed one at a time on a worker thread while the
-window stays free for browsing, reading and adding more."""
+"""Background queue. Videos move through download -> locate -> area check -> scan while the
+window stays free for browsing, reading and adding more.
+
+Downloads are network-bound, so several run at once. Locating and scanning are CPU-bound,
+so only as many run as the machine has room for. A video waiting for its area check
+holds no slot, so the rest keep moving.
+"""
 import itertools
 import os
 import threading
@@ -10,8 +15,14 @@ import cv2
 from . import download, info, layout, vision
 
 AREA_WAIT = 15          # seconds the area guess waits for a look before going ahead
+DOWNLOADS = 3           # downloads at once
+CPU_SLOTS = 2 if (os.cpu_count() or 4) >= 8 else 1   # locate/scan at once
 
 _ids = itertools.count(1)
+
+WAITING = ("queued", "downloaded", "area", "ready")
+WORKING = ("download", "locate", "scan", "read", "save")
+FINISHED = ("done", "failed", "skipped", "cancelled")
 
 
 class Job:
@@ -21,7 +32,7 @@ class Job:
         self.collection = collection
         self.area_wait = area_wait
         self.title = title or url
-        self.status = "queued"      # queued download locate area scan read save done failed skipped cancelled
+        self.status = "queued"
         self.progress = 0.0
         self.detail = ""
         self.error = None
@@ -35,6 +46,7 @@ class Job:
         self.held = False           # the user touched the box: wait for them, no timer
         self.deadline = 0
         self.found = 0
+        self.cancel = False
 
     def view(self):
         return {
@@ -58,16 +70,26 @@ class Queue:
         self.jobs = []
         self.lock = threading.Lock()
         self.wake = threading.Event()
-        threading.Thread(target=self._worker, daemon=True).start()
+        self._last_emit = 0.0
+        self._pending = False
+        threading.Thread(target=self._schedule, daemon=True).start()
 
     # ---- control from the window ----------------------------------------------
     def add(self, url, collection=None, area_wait=AREA_WAIT, title=None):
         job = Job(url, collection, area_wait, title)
         with self.lock:
             self.jobs.append(job)
+        if not title:       # show the real title right away, not the link
+            threading.Thread(target=self._fill_title, args=(job,), daemon=True).start()
         self.changed()
         self.wake.set()
         return job
+
+    def _fill_title(self, job):
+        t = download.peek_title(job.url)
+        if t and job.title == job.url:
+            job.title = t
+            self.changed()
 
     def skip(self, url, title, reason, collection=None):
         """A playlist entry we already know can't be done (private, deleted)."""
@@ -85,6 +107,7 @@ class Queue:
         if j and j.status == "area":
             j.region = tuple(int(v) for v in region)
             j.confirmed = True
+            self.wake.set()
 
     def hold(self, jid):
         j = self.get(jid)
@@ -94,50 +117,88 @@ class Queue:
 
     def cancel(self, jid):
         j = self.get(jid)
-        if not j:
-            return
-        if j.status == "queued":
-            j.status = "cancelled"
-        elif j.status not in ("done", "failed", "skipped", "cancelled"):
+        if j and j.status not in FINISHED:
             j.cancel = True
-        self.changed()
+            self.wake.set()
 
     def clear(self):
         with self.lock:
-            self.jobs = [j for j in self.jobs if j.status not in ("done", "failed", "skipped", "cancelled")]
+            self.jobs = [j for j in self.jobs if j.status not in FINISHED]
         self.changed()
 
     def views(self):
         return [j.view() for j in self.jobs]
 
     def changed(self, job=None):
-        self.emit("jobs", self.views())
+        """Tell the window. Several downloads report progress at once, so updates are
+        batched to about seven a second."""
+        now = time.time()
+        if now - self._last_emit >= 0.15:
+            self._last_emit = now
+            self._pending = False
+            self.emit("jobs", self.views())
+        else:
+            self._pending = True
 
-    # ---- the worker ---------------------------------------------------------------
-    def _worker(self):
+    # ---- scheduling ---------------------------------------------------------------
+    def _schedule(self):
         while True:
-            job = next((j for j in self.jobs if j.status == "queued"), None)
-            if not job:
-                self.wake.wait(1)
-                self.wake.clear()
-                continue
-            try:
-                self._run(job)
-                job.status = "done"
-                job.progress = 1
-                self.emit("job_done", job.view())
-            except Cancelled:
-                job.status = "cancelled"
-            except Exception as e:
-                job.status = "skipped" if job.collection else "failed"
-                job.error = friendly(e)
-            finally:
-                self._drop_video(job)
+            starts = []
+            with self.lock:
+                now = time.time()
+                for j in self.jobs:
+                    if j.cancel and j.status in WAITING:
+                        j.status = "cancelled"
+                        self._drop_video(j)
+                    elif j.status == "area" and (j.confirmed or (not j.held and now >= j.deadline)):
+                        j.status, j.detail = "ready", "Waiting for a free slot"
+                downloads = sum(j.status == "download" for j in self.jobs)
+                cpu = sum(j.status in ("locate", "scan", "read", "save") for j in self.jobs)
+                # finish songs before starting new ones: scans first, then locating
+                for j in self.jobs:
+                    if cpu < CPU_SLOTS and j.status == "ready":
+                        j.status, j.progress, j.detail = "scan", 0.0, "Watching for new bars"
+                        cpu += 1
+                        starts.append((self._scan, j))
+                for j in self.jobs:
+                    if cpu < CPU_SLOTS and j.status == "downloaded":
+                        j.status, j.progress, j.detail = "locate", 0.0, "Finding the tab and reading song details"
+                        cpu += 1
+                        starts.append((self._locate, j))
+                for j in self.jobs:
+                    if downloads < DOWNLOADS and j.status == "queued":
+                        j.status, j.progress, j.detail = "download", 0.0, "Video only, no audio"
+                        downloads += 1
+                        starts.append((self._download, j))
+            for fn, j in starts:
+                threading.Thread(target=self._guard, args=(fn, j), daemon=True).start()
+            if starts or self._pending:
+                self._last_emit = 0
                 self.changed()
+            self.wake.wait(0.25)
+            self.wake.clear()
+
+    def _guard(self, fn, job):
+        try:
+            fn(job)
+        except Cancelled:
+            job.status = "cancelled"
+            self._drop_video(job)
+        except Exception as e:
+            job.status = "skipped" if job.collection else "failed"
+            job.error = friendly(e)
+            self._drop_video(job)
+        finally:
+            self._last_emit = 0
+            self.changed()
+            self.wake.set()
+
+    def _check(self, job):
+        if job.cancel:
+            raise Cancelled()
 
     def _step(self, job, status, detail="", progress=0.0):
-        if getattr(job, "cancel", False):
-            raise Cancelled()
+        self._check(job)
         job.status, job.detail, job.progress = status, detail, progress
         self.changed()
 
@@ -145,26 +206,28 @@ class Queue:
         last = [0.0]
 
         def cb(p):
-            if getattr(job, "cancel", False):
-                raise Cancelled()
+            self._check(job)
             if p - last[0] >= every or p >= 1:
                 last[0] = p
                 job.progress = p
                 self.changed()
         return cb
 
-    def _run(self, job):
-        st = self.settings()
-        self._step(job, "download", "Video only, no audio")
+    # ---- stages ---------------------------------------------------------------------
+    def _download(self, job):
         job.video, job.meta = download.download(job.url, on_progress=self._progress(job))
         job.title = job.meta["title"]
+        self._check(job)
+        job.status, job.detail = "downloaded", "Waiting for a free slot"
 
-        self._step(job, "locate", "Finding the tab and reading song details")
+    def _locate(self, job):
+        st = self.settings()
         job.meta["info"] = info.song_info(job.video, job.meta["title"], job.meta.get("channel", ""),
                                           job.meta.pop("description", ""), gemini_key=st.get("gemini_key"))
         job.meta["notes"] = info.summary(job.meta["info"])
         job.art = fetch(job.meta["info"].get("artwork"))
         region = vision.guess_region(job.video)
+        self._check(job)
         cap = cv2.VideoCapture(job.video)
         W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         dur = vision.video_duration(cap)
@@ -174,26 +237,23 @@ class Queue:
             region = (0, int(H * 0.66), W, int(H * 0.34))
         job.region = tuple(int(v) for v in region)
         job.area = {"width": W, "height": H, "duration": dur, "region": job.region, "found": found, "time": dur * 0.5}
-
-        # Give the user a chance to adjust the box. Nobody around: go with the guess.
+        # Give the user a chance to adjust the box; nobody around, go with the guess.
         # A missed guess waits for a human, since scanning the wrong place is wasted time.
-        wait = job.area_wait if found else 10 ** 9
-        job.deadline = time.time() + wait
-        self._step(job, "area", "Check the tab area")
-        while not job.confirmed:
-            if getattr(job, "cancel", False):
-                raise Cancelled()
-            if not job.held and time.time() >= job.deadline:
-                break
-            time.sleep(0.2)
+        if found and job.area_wait <= 0:
+            job.status, job.detail = "ready", "Waiting for a free slot"
+        else:
+            job.deadline = time.time() + (job.area_wait if found else 10 ** 9)
+            job.status, job.detail = "area", "Check the tab area"
 
-        self._step(job, "scan", "Watching for new bars")
+    def _scan(self, job):
+        st = self.settings()
         strips, sp = vision.scan(job.video, job.region, on_progress=self._progress(job, 0.01),
                                  on_strip=lambda k: (setattr(job, "found", k), self.changed()))
         if not strips:
             raise RuntimeError("No tab showed up inside the box.")
         n = strips[0].n
         data = [(s.image(), s.color, s.t0, s.t1) for s in strips]
+        self._drop_video(job)       # done with the video; free the disk early
 
         self._step(job, "read", "Reading chord names and tempo")
         info.add_strip_info(job.meta["info"], layout.label_bands([d[0] for d in data], sp, n), sp)
@@ -204,6 +264,8 @@ class Queue:
         save_song(self.lib, st, sid, job.meta, data, sp, n, job.region[2], art=job.art,
                   collection=job.collection)
         job.song = sid
+        job.status, job.progress, job.detail = "done", 1.0, ""
+        self.emit("job_done", job.view())
 
     def _drop_video(self, job):
         if job.video and os.path.exists(job.video):

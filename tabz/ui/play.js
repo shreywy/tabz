@@ -261,6 +261,8 @@ document.addEventListener("click", (e) => {
   if (act === "play-back") leavePlay();
   if (act === "fullscreen") toggleFull();
   if (act === "info") toggleInfo();
+  if (act === "reader-pdf" && play.song?.pdf) api().open_path(play.song.pdf);
+  if (act === "reader-folder") api().show_in_folder(play.song?.pdf || null);
   if (act === "page-prev") turn(-1);
   if (act === "page-next") turn(1);
   const pop = $("#metro-pop");
@@ -423,6 +425,36 @@ function bpmChanged() {
 }
 $$(".step-btn").forEach((b) => (b.onclick = () => { $("#bpm").value = metro.bpm() + Number(b.dataset.bpm); bpmChanged(); }));
 $("#bpm").addEventListener("change", bpmChanged);
+
+// Press and drag the number sideways to change the tempo (1 bpm every 4px, Shift for
+// finer steps). A plain click still puts the cursor in the box for typing.
+(function dragBpm() {
+  const inp = $("#bpm");
+  let start = null;
+  inp.addEventListener("pointerdown", (e) => {
+    if (document.activeElement === inp) return;        // already typing
+    e.preventDefault();
+    start = { x: e.clientX, v: metro.bpm(), moved: false };
+    inp.setPointerCapture(e.pointerId);
+  });
+  inp.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    const dx = e.clientX - start.x;
+    if (!start.moved && Math.abs(dx) < 3) return;
+    start.moved = true;
+    document.body.classList.add("dragging-bpm");
+    inp.value = Math.min(300, Math.max(30, start.v + Math.round(dx / (e.shiftKey ? 12 : 4))));
+  });
+  const end = () => {
+    if (!start) return;
+    document.body.classList.remove("dragging-bpm");
+    if (start.moved) bpmChanged();
+    else { inp.focus(); inp.select(); }
+    start = null;
+  };
+  inp.addEventListener("pointerup", end);
+  inp.addEventListener("pointercancel", end);
+})();
 $("#beats").addEventListener("change", (e) => { metro.setBeats(Number(e.target.value)); bpmChanged(); });
 $("#metro-go").onclick = () => (metro.on ? metro.stop() : metro.start());
 

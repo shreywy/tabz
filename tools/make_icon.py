@@ -14,4 +14,4 @@ d.line(pts, fill="#e2643f", width=w, joint="curve")
 for x, y in (pts[0], pts[-1]):
     d.ellipse([x - w / 2, y - w / 2, x + w / 2, y + w / 2], fill="#e2643f")
 img.save("tabz/ui/icon.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
-img.resize((256, 256), Image.LANCZOS).save("out/icon_preview.png")
+

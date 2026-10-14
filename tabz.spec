@@ -3,7 +3,7 @@ import os
 from PyInstaller.utils.hooks import collect_submodules
 
 ui = [(os.path.join("tabz", "ui", f), os.path.join("tabz", "ui"))
-      for f in os.listdir(os.path.join("tabz", "ui")) if f != "dev.html" and f != "fonts"]
+      for f in os.listdir(os.path.join("tabz", "ui")) if f not in ("dev.html", "devlive.html", "fonts")]
 fonts = [(os.path.join("tabz", "ui", "fonts", f), os.path.join("tabz", "ui", "fonts"))
          for f in os.listdir(os.path.join("tabz", "ui", "fonts"))]
 

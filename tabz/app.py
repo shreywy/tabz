@@ -108,6 +108,11 @@ class Api:
                 title, entries = download.playlist(url)
             except Exception as e:
                 return {"error": jobs.friendly(e)}
+            if not entries:
+                # YouTube answers "does not exist" to signed-out viewers of private playlists
+                return {"error": "YouTube won't show this playlist to tabz. It's probably private: set it to "
+                                 "Unlisted or Public in YouTube and try again, or get just the video from this link.",
+                        "single_ok": "v=" in url}
             added = skipped = 0
             for e in entries:
                 if e["ok"]:

@@ -1,0 +1,10 @@
+yt-dlp>=2026.8.19
+opencv-python-headless>=5.0
+numpy>=2.0
+reportlab>=4.0
+pywebview>=6.0
+winocr>=0.0.15
+pillow>=10.0
+
+# building the exe
+pyinstaller>=6.0

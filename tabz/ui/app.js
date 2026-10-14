@@ -110,10 +110,11 @@ function toggleTheme() {
 window.tabz = { on(event, data) { handlers[event]?.(data); } };
 
 const STATUS = {
-  queued: "Waiting", download: "Downloading", locate: "Reading", area: "Check area", scan: "Scanning",
+  queued: "Waiting", download: "Downloading", downloaded: "Downloaded", locate: "Reading", area: "Check area",
+  ready: "Ready to scan", scan: "Scanning",
   read: "Chords", save: "Saving", done: "Done", failed: "Failed", skipped: "Skipped", cancelled: "Cancelled",
 };
-const ACTIVE = ["queued", "download", "locate", "area", "scan", "read", "save"];
+const ACTIVE = ["queued", "download", "downloaded", "locate", "area", "ready", "scan", "read", "save"];
 
 const handlers = {
   jobs(list) {
@@ -141,8 +142,12 @@ function renderQueue() {
   btn.classList.toggle("busy", active.length > 0);
   btn.classList.toggle("attn", waiting.length > 0);
   $("#queue-badge").textContent = active.length || "";
-  const running = state.jobs.find((j) => ["download", "locate", "scan", "read", "save"].includes(j.status));
-  $("#queue-label").textContent = waiting.length ? "Check area" : running ? `${STATUS[running.status]} ${Math.round(running.progress * 100)}%` : "Queue";
+  const working = state.jobs.filter((j) => ["download", "locate", "scan", "read", "save"].includes(j.status));
+  const scanning = working.find((j) => j.status === "scan");
+  $("#queue-label").textContent = waiting.length ? "Check area"
+    : working.length > 1 ? `${working.length} working`
+    : working.length ? `${STATUS[working[0].status]} ${Math.round(working[0].progress * 100)}%`
+    : scanning ? "Scanning" : "Queue";
 
   const ul = $("#queue-list");
   let html = "", group;
@@ -218,6 +223,7 @@ async function addLink(url, whole) {
   if (r.error) {
     $("#home-error").textContent = r.error;
     $("#home-error").hidden = false;
+    if (r.single_ok) toast("Get just the video from that link instead?", [["Get the video", () => addLink(url, false)]], 12000);
     return;
   }
   $("#url").value = "";
