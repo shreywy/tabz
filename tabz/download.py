@@ -51,3 +51,25 @@ def download(url, on_progress=None, dest=TEMP_DIR):
         "duration": info.get("duration") or 0,
         "description": info.get("description") or "",
     }
+
+
+def search(query, n=24):
+    """YouTube search results (no downloads). Flat extraction keeps it to one request."""
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        res = ydl.extract_info(f"ytsearch{n}:{query}", download=False)
+    out = []
+    for e in res.get("entries") or []:
+        vid = e.get("id")
+        if not vid or e.get("ie_key") not in (None, "Youtube"):
+            continue
+        out.append({
+            "id": vid,
+            "title": e.get("title") or "",
+            "channel": e.get("channel") or e.get("uploader") or "",
+            "duration": e.get("duration") or 0,
+            "views": e.get("view_count") or 0,
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "thumb": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+        })
+    return out

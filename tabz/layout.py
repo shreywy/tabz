@@ -186,6 +186,16 @@ def build_rows(strips, screen_w, per_row=2, keep_color=False):
     return [render_row(r, sp_ref, gap, keep_color) for r in rows], row_px
 
 
+def label_bands(images, sp):
+    """The rows above each staff where chord names and tempo marks live. Stops half a
+    string-gap above the top line so string labels drawn on the lines stay out."""
+    out = []
+    for img in images:
+        i = StripInfo(img, None, sp)
+        out.append(i.img[i.top:max(i.top + 1, int(i.y_first - 0.5 * i.sp))])
+    return out
+
+
 def segments(strips, screen_w):
     """Units for the Play view, which reflows them to any width.
 
@@ -230,42 +240,16 @@ def write_pdf(path, rows, row_px, meta, paper="a4"):
     c.setAuthor(meta.get("channel", ""))
     c.setCreator("tabz")
 
+    info = meta.get("info") or {}
+    foot = " — ".join(b for b in (info.get("song"), info.get("artist")) if b) or meta["title"]
+
     def footer(n):
         c.setFont("Plex", 7.5)
         c.setFillGray(0.55)
-        c.drawString(margin, 22, meta["title"][:110])
+        c.drawString(margin, 22, foot[:110])
         c.drawRightString(W - margin, 22, str(n))
 
-    # header
-    y = H - margin
-    c.setFillGray(0.08)
-    c.setFont("Plex-SemiBold", 17)
-    for line in _wrap(meta["title"], "Plex-SemiBold", 17, content_w)[:2]:
-        y -= 20
-        c.drawString(margin, y, line)
-    notes = meta.get("notes") or ""
-    if notes:
-        y -= 17
-        c.setFont("Plex-Medium", 10.5)
-        c.setFillGray(0.08)
-        c.drawString(margin, y, notes[:120])
-    y -= 15
-    c.setFont("Plex", 9)
-    c.setFillGray(0.4)
-    bits = [b for b in (meta.get("channel"), _dur(meta.get("duration")),
-                        datetime.date.today().strftime("%d %b %Y").lstrip("0")) if b]
-    c.drawString(margin, y, "   ·   ".join(bits))
-    y -= 14
-    url = meta["url"]
-    c.setFillColorRGB(0.72, 0.23, 0.13)
-    c.setFont("PlexMono", 8.5)
-    c.drawString(margin, y, url)
-    c.linkURL(url, (margin, y - 3, margin + pdfmetrics.stringWidth(url, "PlexMono", 8.5), y + 9))
-    y -= 12
-    c.setStrokeGray(0.82)
-    c.setLineWidth(0.6)
-    c.line(margin, y, W - margin, y)
-    y -= 16
+    y = draw_header(c, meta, margin, H - margin, content_w)
 
     page = 1
     for im in rows:
@@ -281,6 +265,101 @@ def write_pdf(path, rows, row_px, meta, paper="a4"):
         y -= h + row_gap
     footer(page)
     c.save()
+
+
+ACCENT = (0.72, 0.23, 0.13)
+
+
+def header_cells(info):
+    """(label, value) pairs for the info row, only for what we know."""
+    from .info import sounding_key
+    cells = []
+    if info.get("capo") is not None:
+        cells.append(("Capo", "None" if info["capo"] == 0 else f"Fret {info['capo']}"))
+    if info.get("tuning"):
+        cells.append(("Tuning", info["tuning"]))
+    if info.get("key"):
+        snd = sounding_key(info["key"], info.get("capo"))
+        cells.append(("Key (guess)" if info.get("key_guessed") else "Key",
+                      f"{info['key']} shapes, sounds {snd}" if snd else info["key"]))
+    if info.get("tempo"):
+        cells.append(("Tempo", f"{info['tempo']} bpm"))
+    return cells
+
+
+def draw_header(c, meta, x, top, width):
+    """Song, artist, info row, chords, source line. With c=None nothing is drawn and
+    only the height is worked out (the review preview uses that to paginate)."""
+    info = meta.get("info") or {}
+    song = info.get("song") or meta["title"]
+    artist = info.get("artist") or ""
+    y = top
+
+    def text(font, size, gray, s, tx, ty, color=None):
+        if c is None:
+            return
+        c.setFont(font, size)
+        if color:
+            c.setFillColorRGB(*color)
+        else:
+            c.setFillGray(gray)
+        c.drawString(tx, ty, s)
+
+    for line in _wrap(song, "Plex-SemiBold", 21, width)[:2]:
+        y -= 24
+        text("Plex-SemiBold", 21, 0.08, line, x, y)
+    if artist:
+        y -= 17
+        text("Plex", 12, 0.38, artist, x, y)
+
+    cells = header_cells(info)
+    if cells:
+        y -= 26
+        cx = x
+        for label, value in cells:
+            w = max(pdfmetrics.stringWidth(label.upper(), "PlexMono", 6.8) + 0.6 * len(label),
+                    pdfmetrics.stringWidth(value, "Plex-Medium", 10.5))
+            if cx + w > x + width:
+                break
+            if c is not None:
+                c.setFont("PlexMono", 6.8)
+                c.setFillGray(0.5)
+                c.drawString(cx, y + 13, label.upper(), charSpace=0.6)
+            text("Plex-Medium", 10.5, 0.1, value, cx, y)
+            cx += w + 24
+
+    chords = info.get("chords") or []
+    if chords:
+        y -= 24
+        if c is not None:
+            c.setFont("PlexMono", 6.8)
+            c.setFillGray(0.5)
+            c.drawString(x, y + 13, "CHORDS", charSpace=0.6)
+        cx = x
+        for ch in chords:
+            w = pdfmetrics.stringWidth(ch, "Plex-Medium", 10.5)
+            if cx + w > x + width:
+                break
+            text("Plex-Medium", 10.5, 0.1, ch, cx, y)
+            cx += w + 14
+
+    y -= 22
+    bits = [b for b in (f"Tab from {meta['channel']}" if meta.get("channel") else "",
+                        _dur(meta.get("duration")),
+                        datetime.date.today().strftime("%d %b %Y").lstrip("0")) if b]
+    lead = "   ·   ".join(bits) + "   ·   "
+    text("Plex", 8.5, 0.42, lead, x, y)
+    url = meta["url"].replace("https://", "").replace("www.", "")
+    ux = x + pdfmetrics.stringWidth(lead, "Plex", 8.5)
+    text("PlexMono", 8.5, 0, url, ux, y, ACCENT)
+    if c is not None:
+        c.linkURL(meta["url"], (ux, y - 3, ux + pdfmetrics.stringWidth(url, "PlexMono", 8.5), y + 9))
+    y -= 12
+    if c is not None:
+        c.setStrokeGray(0.82)
+        c.setLineWidth(0.6)
+        c.line(x, y, x + width, y)
+    return y - 16
 
 
 def _bytes(arr):

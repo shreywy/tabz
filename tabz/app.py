@@ -7,6 +7,7 @@ import shutil
 import sys
 import threading
 import time
+import webbrowser
 
 import cv2
 import numpy as np
@@ -16,14 +17,32 @@ from . import download, info, layout, vision
 
 HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 UI = os.path.join(HERE, "tabz", "ui", "index.html")
-CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "tabz")
-CONFIG = os.path.join(CONFIG_DIR, "settings.json")
-LIBRARY = os.path.join(CONFIG_DIR, "library")      # one folder per song, for the Play view
+
+
+def _home():
+    """Folder next to tabz.exe (or the repo when run from source). Falls back to
+    %APPDATA% when that folder can't be written to, e.g. under Program Files."""
+    base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        os.makedirs(os.path.join(base, ".tabz"), exist_ok=True)
+        probe = os.path.join(base, ".tabz", ".write-test")
+        open(probe, "w").close()
+        os.remove(probe)
+        return base
+    except OSError:
+        return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "tabz")
+
+
+BASE = _home()
+DATA_DIR = os.path.join(BASE, ".tabz")
+CONFIG = os.path.join(DATA_DIR, "settings.json")
+LIBRARY = os.path.join(DATA_DIR, "library")        # one folder per song, for the reader
 DEFAULTS = {
-    "out_dir": os.path.join(os.path.expanduser("~"), "Documents", "tabz", "Completed"),
+    "out_dir": os.path.join(BASE, "Completed"),
     "per_row": 2,
     "paper": "a4",
     "keep_color": False,
+    "theme": "system",
 }
 
 
@@ -85,7 +104,7 @@ class Api:
 
     def set_settings(self, changes):
         self.settings.update({k: v for k, v in changes.items() if k in DEFAULTS})
-        os.makedirs(CONFIG_DIR, exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
         with open(CONFIG, "w") as f:
             json.dump(self.settings, f, indent=2)
         return self.settings
@@ -105,14 +124,29 @@ class Api:
                 continue
             pdf = m.get("pdf") if m.get("pdf") and os.path.exists(m["pdf"]) else None
             seen.add(os.path.normcase(pdf or ""))
+            thumb = os.path.join(os.path.dirname(mf), "thumb.png")
             items.append({"name": m["title"], "song": m["id"], "path": pdf, "notes": m.get("notes", ""),
-                          "when": os.path.getmtime(mf)})
+                          "info": m.get("info") or {}, "channel": m.get("channel", ""),
+                          "duration": m.get("duration", 0), "url": m.get("url"),
+                          "bars": len(m.get("segments", [])), "created": m.get("created", 0),
+                          "thumb": _file_url(thumb), "when": os.path.getmtime(mf)})
         for f in glob.glob(os.path.join(self.settings["out_dir"], "*.pdf")):
             if os.path.normcase(f) not in seen:
                 items.append({"name": os.path.splitext(os.path.basename(f))[0], "song": None,
                               "path": f, "notes": "", "when": os.path.getmtime(f)})
         items.sort(key=lambda i: i["when"], reverse=True)
-        return items[:60]
+        return items
+
+    def search(self, query):
+        """YouTube results for the home screen. Runs on pywebview's call thread."""
+        try:
+            return {"results": download.search(query)}
+        except Exception as e:
+            return {"error": _friendly(e)}
+
+    def open_url(self, url):
+        if url and url.startswith("https://"):
+            webbrowser.open(url)
 
     def open_path(self, path):
         if os.path.exists(path):
@@ -146,7 +180,9 @@ class Api:
                 self._emit("progress", p)
         self.video, self.meta = download.download(url, on_progress=prog)
         self._emit("stage", {"stage": "locate"})
-        self.meta["notes"] = " \u00b7 ".join(info.song_info(self.video, self.meta.pop("description", "")))
+        self.meta["info"] = info.song_info(self.video, self.meta["title"], self.meta.get("channel", ""),
+                                           self.meta.pop("description", ""))
+        self.meta["notes"] = info.summary(self.meta["info"])
         self._emit("meta", self.meta)
         region = vision.guess_region(self.video)
         cap = cv2.VideoCapture(self.video)
@@ -194,6 +230,9 @@ class Api:
             return
         self.strips = [(s.image(), s.color, sp, s.t0, s.t1) for s in strips]
         self.removed = set()
+        self._emit("stage", {"stage": "read"})
+        info.add_strip_info(self.meta["info"], layout.label_bands([s[0] for s in self.strips], sp), sp)
+        self.meta["notes"] = info.summary(self.meta["info"])
         self._render_and_save()
         self.busy = False
 
@@ -202,8 +241,9 @@ class Api:
         """Layout changes from the review screen. Re-saves the same PDF."""
         if "removed" in changes:
             self.removed = set(changes.pop("removed"))
-        if "notes" in changes:
-            self.meta["notes"] = changes.pop("notes").strip()
+        if "info" in changes:
+            self.meta["info"].update(_clean_info(changes.pop("info")))
+            self.meta["notes"] = info.summary(self.meta["info"])
         self.set_settings(changes)
         self._render_and_save()
 
@@ -222,6 +262,8 @@ class Api:
         self.song_id = self._save_song([(a, c) for a, b, c, _, _ in keep], path)
         paper = layout.PAPER[st["paper"]]
         pt = (paper[0] - 2 * layout.MARGIN) / row_px
+        top = paper[1] - layout.MARGIN
+        header_h = top - layout.draw_header(None, self.meta, layout.MARGIN, top, paper[0] - 2 * layout.MARGIN)
         self._emit("review", {
             "rows": [{"src": data_url(r, 1400, ".png" if r.ndim == 2 else ".jpg"),
                       "w": r.shape[1] * pt, "h": r.shape[0] * pt} for r in rows],
@@ -230,6 +272,9 @@ class Api:
             "pdf": path,
             "name": os.path.basename(path),
             "notes": self.meta.get("notes", ""),
+            "info": self.meta["info"],
+            "header": {"h": header_h, "cells": layout.header_cells(self.meta["info"])},
+            "sounds": info.sounding_key(self.meta["info"].get("key"), self.meta["info"].get("capo")),
             "song": self.song_id,
         })
 
@@ -241,6 +286,7 @@ class Api:
         shutil.rmtree(folder, ignore_errors=True)
         os.makedirs(folder)
         segs, unit, sp = layout.segments(strips, self.region[2])
+        cv2.imwrite(os.path.join(folder, "thumb.png"), _thumb(segs, unit))
         items = []
         for n, sg in enumerate(segs):
             name = f"{n:03d}.png"
@@ -249,7 +295,7 @@ class Api:
         manifest = {
             "id": sid, "title": self.meta["title"], "url": self.meta["url"],
             "channel": self.meta.get("channel", ""), "duration": self.meta.get("duration", 0),
-            "notes": self.meta.get("notes", ""), "pdf": pdf, "unit": unit, "sp": sp,
+            "notes": self.meta.get("notes", ""), "info": self.meta["info"], "pdf": pdf, "unit": unit, "sp": sp,
             "created": old.get("created", time.time()), "bpm": old.get("bpm"),
             "segments": items,
         }
@@ -302,6 +348,53 @@ class Api:
         self._drop_video()
 
 
+def _thumb(segs, unit, width=640):
+    """First screen-width of a song, as a small picture for the library card."""
+    row, used = [], 0
+    for sg in segs:
+        if used >= unit:
+            break
+        row.append(sg)
+        used += sg["img"].shape[1]
+    above = max(int(sg["staff_y"]) for sg in row)
+    below = max(sg["img"].shape[0] - int(sg["staff_y"]) for sg in row)
+    out = np.full((above + below, sum(sg["img"].shape[1] for sg in row)), 255, np.uint8)
+    x = 0
+    for sg in row:
+        im, top = sg["img"], above - int(sg["staff_y"])
+        out[top:top + im.shape[0], x:x + im.shape[1]] = im
+        x += im.shape[1]
+    out = out[:, :int(unit)]
+    return cv2.resize(out, (width, max(1, int(out.shape[0] * width / out.shape[1]))), interpolation=cv2.INTER_AREA)
+
+
+def _file_url(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+
+
+def _clean_info(d):
+    """Edits from the review form. Numbers stay numbers, blanks become None."""
+    out = {}
+    for k in ("song", "artist", "tuning", "key"):
+        if k in d:
+            out[k] = str(d[k]).strip()[:120] or None
+    for k, lo, hi in (("capo", 0, 12), ("tempo", 20, 400)):
+        if k in d:
+            try:
+                v = int(str(d[k]).strip())
+                out[k] = v if lo <= v <= hi else None
+            except ValueError:
+                out[k] = None
+    if "chords" in d:
+        out["chords"] = [c for c in str(d["chords"]).replace(",", " ").split() if c][:40]
+    if "key" in out:
+        out["key_guessed"] = False
+    return out
+
+
 def _read_json(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -327,10 +420,12 @@ def main():
     shutil.rmtree(download.TEMP_DIR, ignore_errors=True)   # leftovers from a crash
     api = Api()
     window = webview.create_window("tabz", UI, js_api=api, width=1180, height=800,
-                                   min_size=(900, 640), background_color="#f3f0e8")
+                                   min_size=(900, 640), background_color="#f3f0e8", text_select=True)
     api.window = window
     window.events.closed += api.cleanup
-    webview.start(debug="--debug" in sys.argv)
+    # not private: keeps localStorage (theme, reader size, click sound) between launches
+    webview.start(debug="--debug" in sys.argv, private_mode=False,
+                  storage_path=os.path.join(DATA_DIR, "webview"))
 
 
 if __name__ == "__main__":

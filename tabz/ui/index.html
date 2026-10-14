@@ -6,49 +6,94 @@
 <title>tabz</title>
 <link rel="icon" href="logo.svg">
 <link rel="stylesheet" href="app.css">
+<script>
+  // apply the saved theme before first paint so there's no flash
+  try { const t = localStorage.getItem("tabz.theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+</script>
 </head>
 <body>
 <header class="bar">
-  <a class="brand" href="#" data-go="home" aria-label="tabz home">
-    <img src="logo.svg" alt="" width="26" height="26">
-    <span>tab<em>z</em></span>
-  </a>
-  <ol class="steps" aria-label="Progress">
-    <li data-step="home"><b>01</b>Link</li>
+  <a class="brand" href="#" data-go="home">tab<em>z</em></a>
+  <nav class="nav" aria-label="Sections">
+    <button data-go="home">New</button>
+    <button data-go="library">Library <span class="count" id="lib-count"></span></button>
+  </nav>
+  <ol class="steps" id="steps" aria-label="Progress" hidden>
+    <li data-step="download"><b>01</b>Download</li>
     <li data-step="area"><b>02</b>Area</li>
     <li data-step="scan"><b>03</b>Scan</li>
     <li data-step="review"><b>04</b>Review</li>
   </ol>
-  <button class="icon-btn" id="open-settings" aria-label="Settings" title="Settings">
-    <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="5" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/><circle cx="13" cy="10" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="15" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/></svg>
-  </button>
+  <div class="bar-end">
+    <button class="icon-btn theme-btn" data-action="theme" title="Light or dark (D)" aria-label="Switch light or dark theme">
+      <svg class="i-moon" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M15.5 12.6A6.5 6.5 0 0 1 7.4 4.5a6.5 6.5 0 1 0 8.1 8.1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      <svg class="i-sun" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><circle cx="10" cy="10" r="3.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M4.5 15.5l1.4-1.4M14.1 5.9l1.4-1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+    <button class="icon-btn" id="open-settings" aria-label="Settings" title="Settings">
+      <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="5" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/><circle cx="13" cy="10" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="15" r="2" fill="var(--paper)" stroke="currentColor" stroke-width="1.6"/></svg>
+    </button>
+  </div>
 </header>
 
 <main>
-  <!-- 01 link -->
+  <!-- new: link or search -->
   <section class="screen home" data-screen="home">
     <div class="home-inner">
-      <h1>Tab from play-along videos</h1>
-      <p class="lede">Paste a YouTube link. tabz downloads the video, finds the tab on screen and saves every bar to one PDF.</p>
+      <div class="home-top" id="home-top">
+        <h1>Tab from play-along videos</h1>
+        <p class="lede">Paste a YouTube link, or search for a song. tabz downloads the video, finds the tab on screen and keeps every bar as a PDF and in your library.</p>
+      </div>
       <form id="link-form" class="link" autocomplete="off">
-        <label for="url" class="sr">YouTube link</label>
-        <input id="url" type="url" required placeholder="https://www.youtube.com/watch?v=…" spellcheck="false">
-        <button type="submit" class="btn primary">Get tabs</button>
+        <svg class="link-icon" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m12.4 12.4 4.3 4.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <label for="url" class="sr">YouTube link or search</label>
+        <input id="url" type="text" required placeholder="youtube.com/watch?v=…  or  hotel california fingerstyle tab" spellcheck="false">
+        <button type="submit" class="btn primary" id="go">Search</button>
       </form>
       <p class="error" id="home-error" role="alert" hidden></p>
 
-      <div class="library">
-        <div class="library-head">
-          <h2>Saved</h2>
-          <button class="link-btn" data-action="open-folder">Open folder</button>
+      <div class="results-wrap" id="results-wrap" hidden>
+        <div class="section-head">
+          <h2 id="results-title">Results</h2>
+          <span class="hint">Pick one with tab on screen. tabz checks the rest.</span>
         </div>
-        <ul id="library"></ul>
-        <p class="empty" id="library-empty">Nothing yet. Your PDFs will show up here.</p>
+        <ul class="results" id="results"></ul>
+      </div>
+
+      <div class="recent" id="recent-wrap">
+        <div class="section-head">
+          <h2>Recent</h2>
+          <button class="link-btn" data-go="library">All in library</button>
+        </div>
+        <ul class="cards compact" id="recent"></ul>
+        <p class="empty" id="recent-empty">Nothing yet. Songs you extract show up here.</p>
       </div>
     </div>
   </section>
 
-  <!-- working: download / locate / scan -->
+  <!-- library -->
+  <section class="screen library" data-screen="library">
+    <div class="lib-inner">
+      <div class="lib-tools">
+        <h1>Library</h1>
+        <div class="lib-search">
+          <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m12.4 12.4 4.3 4.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <input id="lib-filter" type="search" placeholder="Song, artist, chord, capo…" aria-label="Filter library">
+        </div>
+        <div class="seg" id="lib-sort" title="Sort">
+          <button data-sort="recent">Recent</button><button data-sort="song">Song</button><button data-sort="artist">Artist</button>
+        </div>
+        <button class="link-btn" data-action="open-folder">PDF folder</button>
+      </div>
+      <ul class="cards" id="library"></ul>
+      <div class="empty big" id="library-empty">
+        <p>Your library is empty.</p>
+        <button class="btn primary" data-go="home">Get your first tab</button>
+      </div>
+      <p class="empty" id="library-nomatch" hidden>No songs match that.</p>
+    </div>
+  </section>
+
+  <!-- working: download / locate / scan / read -->
   <section class="screen working" data-screen="working">
     <div class="working-inner">
       <p class="kicker" id="work-stage">Downloading</p>
@@ -64,7 +109,7 @@
     </div>
   </section>
 
-  <!-- 02 area -->
+  <!-- area -->
   <section class="screen area" data-screen="area">
     <div class="area-main">
       <div class="stage" id="stage">
@@ -83,7 +128,7 @@
     <aside class="side">
       <p class="kicker">Step 2</p>
       <h2>Check the tab area</h2>
-      <p id="area-msg">The box is a guess. Drag it or its edges so it covers the string lines and the chord names above them. Scrub through the video to check it fits the whole way.</p>
+      <p id="area-msg"></p>
       <dl class="facts" id="area-facts"></dl>
       <div class="side-actions">
         <button class="btn primary" id="scan-btn">Scan video</button>
@@ -92,51 +137,7 @@
     </aside>
   </section>
 
-  <!-- play: reflowing tab + metronome -->
-  <section class="screen play" data-screen="play">
-    <div class="play-bar">
-      <button class="icon-btn" data-action="play-back" title="Back (Esc)" aria-label="Back">
-        <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </button>
-      <div class="play-title"><b id="play-title"></b><span id="play-notes"></span></div>
-
-      <div class="ctl" title="Screens of tab per line (keys 1-4)">
-        <span class="group-label">Per line</span>
-        <div class="seg" id="per-line">
-          <button data-n="1">1</button><button data-n="2">2</button><button data-n="3">3</button><button data-n="4">4</button>
-        </div>
-      </div>
-      <div class="ctl" title="Size (+ and - keys)">
-        <span class="group-label">Size</span>
-        <input type="range" id="zoom" min="0" max="1000" value="500" aria-label="Size">
-      </div>
-
-      <div class="ctl metro">
-        <span class="group-label">Click</span>
-        <div class="beats" id="beat-dots" aria-hidden="true"></div>
-        <div class="bpm">
-          <button class="step-btn" data-bpm="-1" aria-label="Slower">−</button>
-          <input id="bpm" type="number" min="30" max="300" value="80" aria-label="Beats per minute">
-          <button class="step-btn" data-bpm="1" aria-label="Faster">+</button>
-        </div>
-        <select id="beats" aria-label="Beats per bar">
-          <option value="2">2/4</option><option value="3">3/4</option><option value="4" selected>4/4</option><option value="6">6/8</option>
-        </select>
-        <button class="btn ghost small" id="tap" title="Tap along to set the tempo (T)">Tap</button>
-        <button class="btn primary small" id="metro-go" title="Start or stop (Space)">Start</button>
-      </div>
-
-      <div class="seg" id="theme" title="Page colour">
-        <button data-theme="paper">Paper</button><button data-theme="dark">Dark</button>
-      </div>
-      <button class="icon-btn" data-action="fullscreen" title="Full screen (F)" aria-label="Full screen">
-        <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M3.5 7.5v-4h4M16.5 7.5v-4h-4M3.5 12.5v4h4M16.5 12.5v4h-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
-      </button>
-    </div>
-    <div class="sheet-view" id="sheet"></div>
-  </section>
-
-  <!-- 04 review -->
+  <!-- review -->
   <section class="screen review" data-screen="review">
     <div class="pages" id="pages" aria-label="PDF preview"></div>
     <aside class="side review-side">
@@ -144,51 +145,128 @@
         <p class="kicker">Saved</p>
         <p class="saved-name" id="saved-name"></p>
         <div class="side-actions">
-          <button class="btn primary" data-action="play-current">Play</button>
-          <button class="btn ghost" data-action="open-pdf">Open PDF</button>
-          <button class="btn ghost" data-action="show-pdf">Show in folder</button>
+          <button class="btn primary" data-action="play-current">Open in reader</button>
+          <button class="btn ghost" data-action="open-pdf">PDF</button>
+          <button class="btn ghost" data-action="show-pdf">Folder</button>
         </div>
       </div>
 
-      <div class="group">
-        <label class="group-label" for="notes">Header notes</label>
-        <input id="notes" class="field" placeholder="Capo 2 · Standard tuning">
-      </div>
+      <form class="group details" id="details" autocomplete="off">
+        <span class="group-label">Song details</span>
+        <label class="fld wide"><span>Song</span><input name="song"></label>
+        <label class="fld wide"><span>Artist</span><input name="artist"></label>
+        <div class="fld-row">
+          <label class="fld"><span>Capo</span><input name="capo" inputmode="numeric" placeholder="–"></label>
+          <label class="fld"><span>Tuning</span><input name="tuning" placeholder="Standard"></label>
+        </div>
+        <div class="fld-row">
+          <label class="fld"><span>Key <em id="key-guess" hidden>guess</em></span><input name="key" placeholder="–"></label>
+          <label class="fld"><span>Tempo</span><input name="tempo" inputmode="numeric" placeholder="bpm"></label>
+        </div>
+        <label class="fld wide"><span>Chords</span><input name="chords" placeholder="D G A Bm7"></label>
+      </form>
 
       <div class="group">
-        <span class="group-label">Per row</span>
-        <div class="seg" data-setting="per_row">
-          <button data-value="1">1</button><button data-value="2">2</button><button data-value="3">3</button>
+        <span class="group-label">PDF layout</span>
+        <div class="seg" data-setting="per_row" title="Screens of tab per row">
+          <button data-value="1">1 per row</button><button data-value="2">2</button><button data-value="3">3</button>
         </div>
-      </div>
-      <div class="group two">
-        <div>
-          <span class="group-label">Paper</span>
+        <div class="seg-row">
           <div class="seg" data-setting="paper">
             <button data-value="a4">A4</button><button data-value="letter">Letter</button>
           </div>
-        </div>
-        <div>
-          <span class="group-label">Style</span>
           <div class="seg" data-setting="keep_color">
             <button data-value="false">Clean</button><button data-value="true">Original</button>
           </div>
         </div>
       </div>
 
-      <div class="group strips-group">
+      <div class="group">
         <span class="group-label">Strips <span class="muted" id="strip-count"></span></span>
         <p class="hint">Click a strip to leave it out.</p>
         <ul class="strips" id="strips"></ul>
       </div>
 
-      <button class="btn ghost wide" data-action="new">New video</button>
+      <button class="btn ghost wide" data-action="new">Done</button>
     </aside>
+  </section>
+
+  <!-- reader -->
+  <section class="screen play" data-screen="play">
+    <div class="play-bar">
+      <button class="icon-btn" data-action="play-back" title="Back (Esc)" aria-label="Back">
+        <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="play-title"><b id="play-title"></b><span id="play-artist"></span></div>
+
+      <div class="ctl" title="Screens of tab per line (keys 1-4)">
+        <div class="seg" id="per-line">
+          <button data-n="1">1</button><button data-n="2">2</button><button data-n="3">3</button><button data-n="4">4</button>
+        </div>
+        <input type="range" id="zoom" min="0" max="1000" value="500" aria-label="Size" title="Size (+ and -)">
+      </div>
+      <div class="seg" id="view-mode" title="Scroll, or turn pages (← →)">
+        <button data-mode="scroll">Scroll</button><button data-mode="pages">Pages</button>
+      </div>
+
+      <div class="ctl metro">
+        <div class="beats" id="beat-dots" aria-hidden="true"></div>
+        <div class="bpm">
+          <button class="step-btn" data-bpm="-1" aria-label="Slower">−</button>
+          <input id="bpm" type="number" min="30" max="300" value="80" aria-label="Beats per minute">
+          <button class="step-btn" data-bpm="1" aria-label="Faster">+</button>
+        </div>
+        <button class="btn ghost small" id="tap" title="Tap along to set the tempo (T)">Tap</button>
+        <button class="btn primary small" id="metro-go" title="Start or stop (Space)">Start</button>
+        <button class="icon-btn" id="metro-more" title="Click sound and timing" aria-label="Metronome options" aria-expanded="false">
+          <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="pop" id="metro-pop" hidden>
+          <label class="fld"><span>Sound</span>
+            <select id="m-sound"><option value="beep">Beep</option><option value="hat">Hi-hat</option><option value="wood">Woodblock</option><option value="kit">Kick + hat</option><option value="rim">Rim click</option></select>
+          </label>
+          <label class="fld"><span>Time</span>
+            <select id="beats"><option value="2">2/4</option><option value="3">3/4</option><option value="4" selected>4/4</option><option value="5">5/4</option><option value="6">6/8</option><option value="7">7/8</option></select>
+          </label>
+          <label class="fld"><span>Subdivide</span>
+            <select id="m-sub"><option value="1">Off</option><option value="2">Eighths</option><option value="3">Triplets</option><option value="4">Sixteenths</option></select>
+          </label>
+          <label class="fld"><span>Accent beat one</span>
+            <select id="m-accent"><option value="1">On</option><option value="0">Off</option></select>
+          </label>
+          <label class="fld wide"><span>Volume</span><input type="range" id="m-vol" min="0" max="100" value="70"></label>
+        </div>
+      </div>
+
+      <div class="bar-end">
+        <button class="icon-btn" data-action="info" title="Song details (I)" aria-label="Song details">
+          <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><circle cx="10" cy="10" r="7.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 9v5M10 6.2v.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+        <button class="icon-btn theme-btn" data-action="theme" title="Light or dark (D)" aria-label="Switch light or dark theme">
+          <svg class="i-moon" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M15.5 12.6A6.5 6.5 0 0 1 7.4 4.5a6.5 6.5 0 1 0 8.1 8.1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          <svg class="i-sun" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><circle cx="10" cy="10" r="3.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.2v2M10 15.8v2M2.2 10h2M15.8 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M4.5 15.5l1.4-1.4M14.1 5.9l1.4-1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+        <button class="icon-btn" data-action="fullscreen" title="Full screen (F)" aria-label="Full screen">
+          <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M3.5 7.5v-4h4M16.5 7.5v-4h-4M3.5 12.5v4h4M16.5 12.5v4h-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="reader">
+      <div class="sheet-view" id="sheet"></div>
+      <div class="page-nav" id="page-nav" hidden>
+        <button class="pn prev" data-action="page-prev" aria-label="Previous page"></button>
+        <button class="pn next" data-action="page-next" aria-label="Next page"></button>
+        <span class="page-no mono" id="page-no"></span>
+      </div>
+      <aside class="info-drawer" id="info-drawer" hidden>
+        <div class="info-body" id="info-body"></div>
+      </aside>
+    </div>
   </section>
 </main>
 
 <div class="sheet-backdrop" id="settings" hidden>
-  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <h2 id="settings-title">Settings</h2>
     <div class="group">
       <span class="group-label">Save PDFs to</span>
@@ -196,9 +274,32 @@
         <code id="out-dir"></code>
         <button class="btn ghost" id="pick-folder">Change</button>
       </div>
+      <p class="hint">Songs for the reader are kept in a <code>.tabz</code> folder next to tabz.exe.</p>
     </div>
-    <p class="hint">Layout options (per row, paper, style) are remembered from the last review.</p>
+    <div class="group">
+      <span class="group-label">Keys in the reader</span>
+      <dl class="keys">
+        <dt>Space</dt><dd>Start or stop the click</dd>
+        <dt>↑ ↓</dt><dd>Tempo (hold Shift for 5)</dd>
+        <dt>T</dt><dd>Tap tempo</dd>
+        <dt>1–4</dt><dd>Screens per line</dd>
+        <dt>+ −</dt><dd>Size</dd>
+        <dt>← →</dt><dd>Turn page (Pages view), page turner pedals work too</dd>
+        <dt>F</dt><dd>Full screen</dd>
+        <dt>D</dt><dd>Light or dark</dd>
+      </dl>
+    </div>
     <div class="side-actions"><button class="btn primary" id="close-settings">Done</button></div>
+  </div>
+</div>
+
+<div class="sheet-backdrop" id="confirm" hidden>
+  <div class="dialog small" role="alertdialog" aria-modal="true" aria-labelledby="confirm-text">
+    <p id="confirm-text"></p>
+    <div class="side-actions">
+      <button class="btn danger" id="confirm-yes">Delete</button>
+      <button class="btn ghost" id="confirm-no">Keep</button>
+    </div>
   </div>
 </div>
 

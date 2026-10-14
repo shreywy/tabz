@@ -5,3 +5,5 @@ dist/
 *.pdf
 out/
 tabz/ui/dev.html
+.tabz/
+Completed/
