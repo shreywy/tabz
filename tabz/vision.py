@@ -232,21 +232,24 @@ class Strip:
     """A growing canvas. Each accepted frame adds its ink at an x offset; the final image
     keeps ink seen in most frames, so playheads and other moving marks drop out."""
 
-    def __init__(self, img, t):
+    def __init__(self, img, crop, t):
         self.sum = img.copy()
         self.cnt = np.ones_like(img)
+        self.color = crop.copy()        # latest raw pixels, for "keep original colours"
         self.x = 0
         self.t0 = self.t1 = t
 
-    def add(self, img, dx, t):
+    def add(self, img, crop, dx, t):
         self.x += dx
         h, w = img.shape
         need = self.x + w - self.sum.shape[1]
         if need > 0:
             pad = np.zeros((h, need), np.float32)
             self.sum = np.hstack([self.sum, pad]); self.cnt = np.hstack([self.cnt, pad])
+            self.color = np.hstack([self.color, np.full((h, need, 3), 255, np.uint8)])
         self.sum[:, self.x:self.x + w] += img
         self.cnt[:, self.x:self.x + w] += 1
+        self.color[:, self.x:self.x + w] = crop
         self.t1 = t
 
     def image(self):
@@ -327,7 +330,8 @@ def scan(path, region, fps=4.0, on_progress=None):
         if on_progress and i % (step * 8) == 1:
             on_progress(min(1.0, i / total))
 
-        img = ink(frame[y:y + h, x:x + w], sp)
+        crop = frame[y:y + h, x:x + w]
+        img = ink(crop, sp)
         if not has_staff(img, sp):
             continue                     # intro, talking head, end screen
         small = cv2.resize(notes_only(img, sp), None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
@@ -336,19 +340,19 @@ def scan(path, region, fps=4.0, on_progress=None):
             dx, score = match_shift(ref, small)
             if dx is not None and ((abs(dx) <= 2 and score >= SAME) or (dx > 2 and score >= SCROLL)):
                 dx = 0 if dx <= 2 else dx * 2      # back to full resolution
-                cur.add(img, dx, t)
+                cur.add(img, crop, dx, t)
                 ref, pending = small, None
                 continue
         # no match: wait for the picture to settle before starting a new strip
         if pending is not None:
             dx, score = match_shift(pending[1], small)
             if dx is not None and score >= SAME and abs(dx) <= 2:
-                cur = Strip(pending[0], pending[2])
-                cur.add(img, 0, t)
+                cur = Strip(pending[0], pending[3], pending[2])
+                cur.add(img, crop, 0, t)
                 strips.append(cur)
                 ref, pending = small, None
                 continue
-        pending = (img, small, t)
+        pending = (img, small, t, crop)
     cap.release()
     if on_progress:
         on_progress(1.0)
