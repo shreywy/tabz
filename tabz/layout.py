@@ -39,8 +39,53 @@ class Piece:
         return self.x1 - self.x0
 
 
+def redraw_staves(img, sp):
+    """Draw every detected staff line solid. Some renderers draw 1px grey lines that come
+    out faint or broken after cleaning; since we know where the lines are, re-ink them so
+    every source prints equally crisp. Notation staves above the tab get the same."""
+    m = cv2.morphologyEx(img, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp * 0.9), 1)))
+    out = img.copy()
+    thick = 1 if sp < 22 else 2
+    for y0, y1, gsp, n in staff_groups(row_peaks(m.mean(axis=1), 0.25, sp * 0.35)):
+        for y in np.linspace(y0, y1, n):
+            y = int(round(y))
+            row = m[max(0, y - 1):y + 2].max(axis=0) > 0.2
+            # only along stretches where the line really runs, not across gaps between systems
+            edges = np.flatnonzero(np.diff(np.r_[0, row.astype(np.int8), 0]))
+            for a, b in zip(edges[::2], edges[1::2]):
+                if b - a >= sp * 2:
+                    band = out[max(0, y - thick // 2):y - thick // 2 + thick, a:b]
+                    np.maximum(band, 0.92, out=band)
+    return out
+
+
+def despeckle(img, sp):
+    """Drop small marks with nothing else near them: video noise or the edge of something
+    behind the panel. Dots and strum marks sit close to notes or lines, so they stay."""
+    m = (img > 0.35).astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    if n < 2:
+        return img
+    w, h, area = stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT], stats[:, cv2.CC_STAT_AREA]
+    small = (w < sp * 0.6) & (h < sp * 0.6) & (area < (sp * 0.35) ** 2)
+    small[0] = False
+    if not small.any():
+        return img
+    big = small.copy()
+    big[:] = ~small
+    big[0] = False
+    near = cv2.dilate(big[lab].astype(np.uint8), np.ones((_odd(sp * 1.6), _odd(sp * 1.6)), np.uint8)) > 0
+    kill = small[lab] & ~near
+    if not kill.any():
+        return img
+    out = img.copy()
+    out[cv2.dilate(kill.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0] = 0
+    return out
+
+
 class StripInfo:
     def __init__(self, img, color, sp_hint):
+        img = despeckle(redraw_staves(img, sp_hint), sp_hint)
         self.img = img          # ink 0..1
         self.color = color      # BGR uint8 or None
         m = cv2.morphologyEx(img, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(sp_hint * 0.9), 1)))
@@ -176,7 +221,15 @@ def render_row(row, sp_px, gap, keep_color=False):
     return out
 
 
-def build_rows(strips, screen_w, per_row=2, keep_color=False):
+MIN_GAP_PT = 3.6    # smallest string spacing "Auto" will print (about 1.3 mm)
+
+
+def auto_per_row(sp, unit, content_w=A4[0] - 80):
+    """As many screens per row as fit without the strings getting closer than MIN_GAP_PT."""
+    return int(max(1, min(3, content_w * sp / (MIN_GAP_PT * unit))))
+
+
+def build_rows(strips, screen_w, per_row="auto", keep_color=False):
     """strips: [(ink_img, color_img_or_None, sp)]. screen_w: width of the cropped box in
     source pixels. per_row: how many screen-widths of tab fit across one row."""
     infos = [StripInfo(img, col, sp) for img, col, sp in strips]
@@ -185,6 +238,7 @@ def build_rows(strips, screen_w, per_row=2, keep_color=False):
         i.norm = sp_ref / i.sp
     # one "screen" = the widest single page after scaling, so per_row of them always fit
     unit = max(min(i.x_end - i.x_start, screen_w) * i.norm for i in infos)
+    per_row = auto_per_row(sp_ref, unit) if per_row == "auto" else int(per_row)
     gap = unit * 0.03
     row_px = unit * per_row + gap * (per_row - 1)
     rows = flow(infos, row_px, gap)

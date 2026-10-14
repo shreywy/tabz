@@ -39,7 +39,7 @@ CONFIG = os.path.join(DATA_DIR, "settings.json")
 LIBRARY = os.path.join(DATA_DIR, "library")        # one folder per song, for the reader
 DEFAULTS = {
     "out_dir": os.path.join(BASE, "Completed"),
-    "per_row": 2,
+    "per_row": "auto",
     "paper": "a4",
     "keep_color": False,
     "theme": "system",
@@ -258,7 +258,7 @@ class Api:
             return
         st = self.settings
         rows, row_px = layout.build_rows([(a, b, c) for a, b, c, _, _ in keep], self.region[2],
-                                         per_row=int(st["per_row"]), keep_color=bool(st["keep_color"]))
+                                         per_row=st["per_row"], keep_color=bool(st["keep_color"]))
         os.makedirs(st["out_dir"], exist_ok=True)
         path = os.path.join(st["out_dir"], download.safe_filename(self.meta["title"]) + ".pdf")
         layout.write_pdf(path, rows, row_px, self.meta, paper=st["paper"], art=self.art)

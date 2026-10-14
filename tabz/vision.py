@@ -191,11 +191,20 @@ def grow_box(gray, x0, x1, y0, y1, sp):
     def plain(strip):
         return abs(np.median(strip) - bg) < 28
 
-    # start half a string-gap outside the staff so thick lines don't stop us at once
-    top = int(y0 - sp / 2)
+    # Step over the thickness of the outer staff line itself (its rows aren't "plain"),
+    # then grow while rows look like the panel. Starting any further out can land past a
+    # panel that ends tight against the staff, and drag in the video behind it.
+    # Start half a string-gap outside the staff (clear of the outer line and its soft
+    # edges). If that row is already off the panel (a panel that ends tight against the
+    # staff), walk back in until it isn't, so the video behind never gets in.
+    top = max(0, int(y0 - sp / 2))
+    while top < y0 - 1 and not plain(gray[top, x0:x1]):
+        top += 1
     while top > 0 and y0 - top < 4.2 * sp and plain(gray[top - 1, x0:x1]):
         top -= 1
-    bot = int(y1 + sp / 2)
+    bot = min(H - 1, int(y1 + sp / 2))
+    while bot > y1 + 1 and not plain(gray[bot, x0:x1]):
+        bot -= 1
     while bot < H - 1 and bot - y1 < 2.6 * sp and plain(gray[bot + 1, x0:x1]):
         bot += 1
     left = x0

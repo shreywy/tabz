@@ -518,7 +518,7 @@ $$(".review .seg").forEach((seg) =>
     if (!b) return;
     const key = seg.dataset.setting;
     let v = b.dataset.value;
-    v = key === "per_row" ? Number(v) : key === "keep_color" ? v === "true" : v;
+    v = key === "per_row" && v !== "auto" ? Number(v) : key === "keep_color" ? v === "true" : v;
     if (state.settings[key] === v) return;
     state.settings[key] = v;
     syncSegs();
