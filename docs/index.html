@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tabz · guitar tab you can read, hear and play along with</title>
+<meta name="description" content="A guitar tab library and practice reader for Windows. Turns YouTube play-along videos into tab, opens Guitar Pro files, reads PDFs and pictures of tab into playable scores, and plays along with backing tracks.">
+<meta property="og:title" content="tabz">
+<meta property="og:description" content="Guitar tab you can read, hear and play along with.">
+<meta property="og:image" content="https://shreywy.github.io/tabz/score.png">
+<link rel="icon" href="logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f3f0e8; --panel: #faf8f3; --raised: #ffffff; --ink: #1c1b19; --ink-2: #57534b; --ink-3: #8d887c;
+    --rule: #dad4c6; --rule-2: #e7e2d6; --accent: #b83a21; --accent-soft: #b83a2114;
+    --shadow: 0 1px 2px #0000000f, 0 18px 50px #00000017;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #161513; --panel: #1d1c19; --raised: #24231f; --ink: #ece8df; --ink-2: #b2ac9f; --ink-3: #7b766b;
+      --rule: #34312b; --rule-2: #292723; --accent: #e2643f; --accent-soft: #e2643f1a;
+      --shadow: 0 1px 2px #0000004d, 0 18px 50px #00000059;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 400 16px/1.6 "IBM Plex Sans", "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: inherit; }
+  img { max-width: 100%; display: block; }
+  .wrap { width: min(1120px, 100% - 40px); margin: 0 auto; }
+  .mono { font-family: "IBM Plex Mono", monospace; }
+
+  header { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--paper) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--rule-2); }
+  header .wrap { display: flex; align-items: center; gap: 28px; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 21px; letter-spacing: -.03em; text-decoration: none; }
+  .brand img { width: 28px; height: 28px; }
+  .brand em { font-style: normal; color: var(--accent); }
+  header nav { display: flex; gap: 22px; margin-left: auto; font-size: 14.5px; }
+  header nav a { text-decoration: none; color: var(--ink-2); }
+  header nav a:hover { color: var(--ink); }
+
+  .btn { display: inline-flex; align-items: center; gap: 9px; height: 46px; padding: 0 22px; border-radius: 9px; font-weight: 500; text-decoration: none; border: 1px solid var(--rule); cursor: pointer; font: inherit; font-weight: 500; background: none; color: var(--ink); transition: transform .15s, background .15s, border-color .15s; }
+  .btn:hover { border-color: var(--ink-3); transform: translateY(-1px); }
+  .btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .btn.small { height: 36px; padding: 0 14px; font-size: 14.5px; }
+  .btn.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+  .hero { padding: 84px 0 40px; text-align: center; }
+  .kicker { font: 500 12.5px "IBM Plex Mono", monospace; text-transform: uppercase; letter-spacing: .1em; color: var(--accent); }
+  .hero h1 { font-size: clamp(36px, 6vw, 64px); line-height: 1.05; letter-spacing: -.035em; margin: 14px auto 18px; max-width: 900px; }
+  .hero p.lede { font-size: 19px; color: var(--ink-2); max-width: 680px; margin: 0 auto; }
+  .ctas { display: flex; gap: 12px; justify-content: center; margin-top: 32px; flex-wrap: wrap; }
+  .fine { color: var(--ink-3); font-size: 13.5px; margin-top: 14px; }
+  .shot { margin: 56px auto 0; border-radius: 12px; overflow: hidden; border: 1px solid var(--rule); box-shadow: var(--shadow); background: var(--panel); }
+  .shot img { width: 100%; }
+
+  section { padding: 76px 0; }
+  section + section { border-top: 1px solid var(--rule-2); }
+  h2 { font-size: clamp(28px, 4vw, 40px); line-height: 1.12; letter-spacing: -.025em; margin: 10px 0 14px; }
+  .sub { color: var(--ink-2); font-size: 17.5px; max-width: 720px; margin: 0; }
+
+  /* the live player */
+  .player { margin-top: 30px; border: 1px solid var(--rule); border-radius: 12px; background: var(--panel); overflow: hidden; box-shadow: var(--shadow); }
+  .player-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 14px; border-bottom: 1px solid var(--rule-2); }
+  .play { width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--ink); color: var(--paper); display: grid; place-items: center; cursor: pointer; }
+  .play .pause, .play.on .go { display: none; }
+  .play.on .pause { display: block; }
+  .player-bar .time { min-width: 92px; color: var(--ink-2); font-size: 13.5px; }
+  .player-bar label { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink-2); }
+  .player-bar input[type=range] { accent-color: var(--accent); width: 110px; }
+  .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 7px; padding: 2px; gap: 2px; }
+  .seg button { border: 0; background: none; height: 30px; padding: 0 11px; border-radius: 5px; cursor: pointer; color: var(--ink-2); font: inherit; font-size: 14px; }
+  .seg button.on { background: var(--ink); color: var(--paper); }
+  .player-bar .grow { flex: 1; }
+  .score-box { height: 520px; overflow: auto; background: var(--raised); position: relative; }
+  .score-box .loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--ink-3); }
+  .at-cursor-bar { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .at-cursor-beat { background: var(--accent); width: 3px; }
+  .at-highlight * { fill: var(--accent); stroke: var(--accent); }
+  .player-note { color: var(--ink-3); font-size: 13.5px; padding: 10px 14px; border-top: 1px solid var(--rule-2); }
+
+  /* features */
+  .feature { display: grid; grid-template-columns: 1fr 1.35fr; gap: 48px; align-items: center; }
+  .feature.flip { grid-template-columns: 1.35fr 1fr; }
+  .feature.flip .text { order: 2; }
+  .feature + .feature { margin-top: 80px; }
+  .feature .text p { color: var(--ink-2); }
+  .feature ul { padding: 0; margin: 16px 0 0; list-style: none; display: grid; gap: 9px; }
+  .feature li { padding-left: 22px; position: relative; color: var(--ink-2); }
+  .feature li::before { content: ""; position: absolute; left: 2px; top: .7em; width: 9px; height: 2px; background: var(--accent); border-radius: 1px; }
+  .frame { border-radius: 10px; overflow: hidden; border: 1px solid var(--rule); box-shadow: var(--shadow); background: var(--panel); }
+  .pair { display: grid; gap: 16px; }
+
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 34px; }
+  .card { border: 1px solid var(--rule); border-radius: 10px; padding: 20px; background: var(--panel); }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--ink-2); font-size: 15px; }
+  .num { font: 500 12px "IBM Plex Mono", monospace; color: var(--accent); }
+
+  .steps { counter-reset: s; display: grid; gap: 14px; margin-top: 28px; padding: 0; list-style: none; max-width: 760px; }
+  .steps li { counter-increment: s; padding-left: 46px; position: relative; color: var(--ink-2); }
+  .steps li::before { content: counter(s); position: absolute; left: 0; top: 0; width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--rule); display: grid; place-items: center; font: 500 13px "IBM Plex Mono", monospace; color: var(--ink); }
+  .steps b { color: var(--ink); }
+
+  footer { padding: 46px 0 60px; color: var(--ink-3); font-size: 14px; border-top: 1px solid var(--rule-2); }
+  footer .wrap { display: grid; gap: 10px; }
+
+  @media (max-width: 860px) {
+    header nav a.hide-sm { display: none; }
+    .feature, .feature.flip { grid-template-columns: 1fr; gap: 24px; }
+    .feature.flip .text { order: 0; }
+    .grid3 { grid-template-columns: 1fr; }
+    .score-box { height: 420px; }
+    .hero { padding-top: 56px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { opacity: 0; transform: translateY(14px); transition: opacity .6s ease, transform .6s ease; }
+    .reveal.in { opacity: 1; transform: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <a class="brand" href="#"><img src="logo.svg" alt=""><span>tab<em>z</em></span></a>
+    <nav>
+      <a href="#try">Try it</a>
+      <a href="#features" class="hide-sm">Features</a>
+      <a href="#how" class="hide-sm">How it works</a>
+      <a href="https://github.com/shreywy/tabz">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero wrap">
+    <p class="kicker">Free for Windows · open source</p>
+    <h1>Guitar tab you can read, hear and play along with</h1>
+    <p class="lede">tabz turns YouTube play-along videos into tab, opens your Guitar Pro files, reads PDFs and pictures of tab into scores you can hear, and plays them along with a backing track while a line moves through the music.</p>
+    <div class="ctas">
+      <a class="btn primary" href="https://github.com/shreywy/tabz/releases/latest">
+        <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10m0 0-4-4m4 4 4-4M4 16h12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download for Windows</a>
+      <a class="btn" href="#try">Try the player</a>
+    </div>
+    <p class="fine">Windows 10 or 11. One file, no installer.</p>
+    <div class="shot reveal"><img src="score.png" alt="A Guitar Pro score open in tabz, with notation, tab, a moving cursor and the view options"></div>
+  </div>
+
+  <section id="try">
+    <div class="wrap">
+      <p class="kicker">Try it here</p>
+      <h2>The score player, right in this page</h2>
+      <p class="sub">This is the same player tabz uses, playing a short arrangement of Ode to Joy. Press play, slow it down, switch parts, or hide the notation and keep the tab.</p>
+      <div class="player reveal">
+        <div class="player-bar">
+          <button class="play" id="p-play" aria-label="Play">
+            <svg class="go" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 4.2v11.6L16 10Z" fill="currentColor"/></svg>
+            <svg class="pause" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h2.8v11H6zM11.2 4.5H14v11h-2.8z" fill="currentColor"/></svg>
+          </button>
+          <span class="time mono" id="p-time">0:00</span>
+          <label>Speed <input type="range" id="p-speed" min="40" max="130" step="10" value="100"><span class="mono" id="p-speed-val">100%</span></label>
+          <button class="btn small" id="p-click">Click</button>
+          <span class="grow"></span>
+          <div class="seg" id="p-part" title="Which part to show and hear">
+            <button data-part="0" class="on">Melody</button><button data-part="1">Chords</button><button data-part="both">Both</button>
+          </div>
+          <div class="seg" id="p-show" title="Notation and tab">
+            <button data-show="both" class="on">Notes + tab</button><button data-show="tab">Tab only</button>
+          </div>
+        </div>
+        <div class="score-box" id="p-wrap"><div id="p-score"></div><div class="loading" id="p-loading">Loading the player…</div></div>
+        <p class="player-note">Drawn and played by <a href="https://alphatab.net">alphaTab</a>, the open source library tabz uses for scores. Click any note to start from there.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="feature">
+        <div class="text">
+          <p class="kicker">Your whole collection</p>
+          <h2>Every tab you own, in one library</h2>
+          <p>Point tabz at a folder and it brings in Guitar Pro files, PDFs, pictures of tab, tab videos and zips of them. Copies are skipped, and a song saved as .gp, .gpx and PDF comes in once.</p>
+          <ul>
+            <li>Browse by artist, genre, acoustic or electric, playing style or difficulty</li>
+            <li>Versions of the same song live in one card</li>
+            <li>Star favorites; Explore suggests what to play next</li>
+            <li>Cover art and genre fill in by themselves</li>
+          </ul>
+        </div>
+        <div class="pair reveal">
+          <div class="frame"><img src="library.png" alt="The library with cover art, tags for style and difficulty, and versions"></div>
+        </div>
+      </div>
+
+      <div class="feature flip">
+        <div class="text">
+          <p class="kicker">Tab you can hear</p>
+          <h2>PDFs and videos become playable scores</h2>
+          <p>tabz reads the fret numbers in tab from videos, PDFs and pictures into notes, so you can hear the tab and follow it like a Guitar Pro file, or save it as one. The original picture stays as it was.</p>
+          <ul>
+            <li>About 9 in 10 notes right on PDFs exported from Guitar Pro</li>
+            <li>Rhythm is a best guess from the spacing</li>
+            <li>Switch between the picture, the playable score and the original pages</li>
+          </ul>
+        </div>
+        <div class="frame reveal"><img src="playable.png" alt="Tab from a video, read into a playable score with notation"></div>
+      </div>
+
+      <div class="feature">
+        <div class="text">
+          <p class="kicker">Play along</p>
+          <h2>A line moves through the music while you play</h2>
+          <p>Pick what you hear: a backing track, the tab's own sound with your part turned off, just a click, or nothing at all. Slow it down to a quarter speed without the backing track changing pitch.</p>
+          <ul>
+            <li>Find a backing track on YouTube or use your own audio</li>
+            <li>Line it up by ear and the sync is saved with the song</li>
+            <li>Click and count-in on top of anything, loops for hard bits</li>
+          </ul>
+        </div>
+        <div class="frame reveal"><img src="sound.png" alt="The sound menu: backing track, tab sound, click only or silent, and the parts you hear"></div>
+      </div>
+
+      <div class="feature flip">
+        <div class="text">
+          <p class="kicker">From YouTube</p>
+          <h2>Play-along videos into clean tab</h2>
+          <p>Paste a link or a playlist, or search. tabz finds the tab on screen, follows it as it swaps or scrolls, and keeps every bar as a PDF and as a song that reflows to any window.</p>
+          <ul>
+            <li>Works on any channel's style, no per-channel rules</li>
+            <li>Song, artist, capo, tuning, tempo and chords filled in</li>
+            <li>Highlights, playheads and dark skins cleaned to black on white</li>
+          </ul>
+        </div>
+        <div class="frame reveal"><img src="reader.png" alt="Tab from a video in the reader, with chord names and the moving line"></div>
+      </div>
+
+      <div class="grid3">
+        <div class="card"><span class="num">01</span><h3>Like Guitar Pro, for reading</h3><p>Pick parts, show or hide notation, tab, slashes, chord diagrams and more. Page or one-long-line layout.</p></div>
+        <div class="card"><span class="num">02</span><h3>Style and difficulty</h3><p>Fingerstyle, strumming or riffs, and a 1 to 5 level, worked out from the notes themselves.</p></div>
+        <div class="card"><span class="num">03</span><h3>Your files stay yours</h3><p>Everything runs on your computer. Imported files are only read, never changed.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <p class="kicker">Getting started</p>
+      <h2>Up and playing in a minute</h2>
+      <ol class="steps">
+        <li><b>Download tabz.exe</b> from the releases page and put it in its own folder. It keeps its library next to itself.</li>
+        <li><b>Add tabs.</b> Paste a YouTube link, search for a song, or choose a folder of Guitar Pro files and PDFs.</li>
+        <li><b>Press play.</b> Pick a backing track, the tab's sound or just the click, set the speed, and play along.</li>
+      </ol>
+      <div class="ctas" style="justify-content:flex-start">
+        <a class="btn primary" href="https://github.com/shreywy/tabz/releases/latest">Download for Windows</a>
+        <a class="btn" href="https://github.com/shreywy/tabz#readme">Read the README</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>tabz is free and open source (MIT). Scores are drawn and played by alphaTab (MPL 2.0).</p>
+    <p>The tabs belong to the people who arranged them. tabz is for your own practice: if a creator sells tabs or has a Patreon, buy from them. The screenshots show tab by Kenneth Acoustic and vvxoFingerstyleTab.</p>
+  </div>
+</footer>
+
+<script src="vendor/alphatab/alphaTab.min.js"></script>
+<script>
+  // gentle fade-in as sections scroll into view
+  const io = new IntersectionObserver((es) => es.forEach((e) => e.isIntersecting && (e.target.classList.add("in"), io.unobserve(e.target))), { threshold: 0.12 });
+  document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+
+  const $ = (s) => document.querySelector(s);
+  const base = new URL("vendor/alphatab/", location.href).href;
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const api = new alphaTab.AlphaTabApi($("#p-score"), {
+    core: { fontDirectory: base + "font/", logLevel: "warning" },
+    display: {
+      scale: innerWidth < 700 ? 0.8 : 1,
+      resources: dark ? { mainGlyphColor: "#e6e1d6", secondaryGlyphColor: "#8f897c", staffLineColor: "#6d685e", barSeparatorColor: "#8f897c", barNumberColor: "#d86b4a", scoreInfoColor: "#e6e1d6" } : {},
+    },
+    player: { enablePlayer: true, soundFont: base + "soundfont/sonivox.sf2", scrollElement: $("#p-wrap"), enableCursor: true, enableAnimatedBeatCursor: true, enableUserInteraction: true },
+  });
+  let score = null, part = "0", show = "both";
+  const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  api.scoreLoaded.on((s) => { score = s; apply(); });
+  api.renderer.partialRenderFinished.on(() => ($("#p-loading").hidden = true));
+  api.playerStateChanged.on((e) => $("#p-play").classList.toggle("on", e.state === 1));
+  api.playerPositionChanged.on((e) => ($("#p-time").textContent = `${clock(e.currentTime * api.playbackSpeed / 1000)} / ${clock(e.endTime * api.playbackSpeed / 1000)}`));
+  api.metronomeVolume = 0;
+  fetch("demo/ode-to-joy.gp").then((r) => r.arrayBuffer()).then((b) => api.load(new Uint8Array(b), [0]));
+
+  function apply() {
+    if (!score) return;
+    for (const t of score.tracks) for (const st of t.staves) { st.showStandardNotation = show === "both"; st.showTablature = true; }
+    const tracks = part === "both" ? score.tracks : [score.tracks[Number(part)]];
+    for (const t of score.tracks) api.changeTrackMute([t], !tracks.includes(t));
+    api.renderTracks(tracks);
+  }
+  $("#p-play").onclick = () => api.playPause();
+  $("#p-speed").oninput = (e) => { api.playbackSpeed = e.target.value / 100; $("#p-speed-val").textContent = e.target.value + "%"; };
+  $("#p-click").onclick = (e) => { const on = !e.target.classList.contains("on"); e.target.classList.toggle("on", on); api.metronomeVolume = on ? 1 : 0; };
+  for (const [id, set] of [["#p-part", (v) => (part = v)], ["#p-show", (v) => (show = v)]]) {
+    $(id).onclick = (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      $(id).querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+      set(b.dataset.part ?? b.dataset.show);
+      apply();
+    };
+  }
+</script>
+</body>
+</html>
