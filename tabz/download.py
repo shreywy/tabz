@@ -18,8 +18,12 @@ def safe_filename(title):
     return name[:150] or "untitled"
 
 
-def download(url, on_progress=None, dest=TEMP_DIR):
-    """Download the video and return (path, info). info has title, url, channel, duration."""
+AUDIO = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio"
+
+
+def download(url, on_progress=None, dest=TEMP_DIR, fmt=FORMAT, name="%(id)s"):
+    """Download the video (or with fmt=AUDIO, just its sound) and return (path, info).
+    info has title, url, channel, duration."""
     os.makedirs(dest, exist_ok=True)
 
     def hook(d):
@@ -29,8 +33,8 @@ def download(url, on_progress=None, dest=TEMP_DIR):
                 on_progress(d.get("downloaded_bytes", 0) / total)
 
     opts = {
-        "format": FORMAT,
-        "outtmpl": os.path.join(dest, "%(id)s.%(ext)s"),
+        "format": fmt,
+        "outtmpl": os.path.join(dest, name + ".%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "noprogress": True,

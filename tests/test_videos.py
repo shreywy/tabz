@@ -38,6 +38,10 @@ CASES = [
     ("Ou_Jv_hJpjU", (1, 2), True),
     # metal tab, scrolling, used to 403 on download
     ("29dm1hKIKUc", (1, 2), True),
+    # ASCII tab on a white panel that's drawn at a different height on each page
+    ("nE7SZtRMWYw", (3, 3), False),
+    # dark panel, blue highlight, pages played two or three times in a row
+    ("Z3YvW1RY4tQ", (33, 35), False),
 ]
 
 

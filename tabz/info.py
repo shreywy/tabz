@@ -395,14 +395,12 @@ Return JSON with these keys, null when the text doesn't say:
 Only use what the text says. Do not guess."""
 
 
-def gemini(key, title, channel, description):
-    """Ask Gemini to read the title and description. {} on any failure: the app never
-    depends on it."""
+def _ask_gemini(key, system, text):
+    """One JSON answer from Gemini, or None on any failure."""
     import json as _json
     import urllib.request
-    text = f"Title: {title}\nChannel: {channel}\nDescription:\n{(description or '')[:4000]}"
     body = {
-        "systemInstruction": {"parts": [{"text": GEMINI_PROMPT}]},
+        "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": text}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
     }
@@ -412,9 +410,17 @@ def gemini(key, title, channel, description):
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             out = _json.load(r)
-        raw = out["candidates"][0]["content"]["parts"][0]["text"]
-        d = _json.loads(raw)
+        return _json.loads(out["candidates"][0]["content"]["parts"][0]["text"])
     except Exception:
+        return None
+
+
+def gemini(key, title, channel, description):
+    """Ask Gemini to read the title and description. {} on any failure: the app never
+    depends on it."""
+    text = f"Title: {title}\nChannel: {channel}\nDescription:\n{(description or '')[:4000]}"
+    d = _ask_gemini(key, GEMINI_PROMPT, text)
+    if not isinstance(d, dict):
         return {}
     clean = {}
     for k in ("song", "artist", "arranger", "tuning", "key"):
@@ -428,6 +434,48 @@ def gemini(key, title, channel, description):
         except (TypeError, ValueError):
             pass
     return clean
+
+
+BACKING_PROMPT = """You pick backing tracks for guitar practice from YouTube search results.
+A good one is the song itself without the guitar part (a "backing track", "no guitar",
+"guitarless" or instrumental version) of the right song by the right artist. Lessons,
+covers, playthroughs and reactions are bad picks. Return JSON: {"best": <index or null>}."""
+
+
+def rank_backing(results, song, artist="", key=None):
+    """Search results ordered best first for playing along to. Title words decide;
+    with a Gemini key, Gemini's pick goes on top."""
+    s_song, s_artist = _norm(song), _norm(artist)
+
+    def score(r):
+        t = r["title"].lower()
+        v = 0
+        if re.search(r"backing\s*track|\bbt\b", t):
+            v += 4
+        if re.search(r"no guitar|without guitar|guitarless|guitar backing|minus guitar", t):
+            v += 3
+        if re.search(r"instrumental|karaoke|minus one", t):
+            v += 1
+        if re.search(r"lesson|tutorial|how to play|cover|reaction|playthrough|tabs?\b", t):
+            v -= 3
+        if s_song and s_song in _norm(t):
+            v += 2
+        if s_artist and s_artist in _norm(t):
+            v += 1
+        return v
+
+    out = sorted(results, key=score, reverse=True)
+    for r in out:
+        r["score"] = score(r)
+    if key and out:
+        listing = "\n".join(f"{k}: {r['title']} ({r['channel']}, {r['duration']}s)" for k, r in enumerate(out[:10]))
+        d = _ask_gemini(key, BACKING_PROMPT, f"Song: {song}\nArtist: {artist}\nResults:\n{listing}")
+        best = d.get("best") if isinstance(d, dict) else None
+        if isinstance(best, int) and 0 <= best < min(10, len(out)):
+            pick = out.pop(best)
+            pick["ai"] = True
+            out.insert(0, pick)
+    return out
 
 
 def file_name(meta):

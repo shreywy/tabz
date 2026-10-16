@@ -143,6 +143,13 @@ def vote_staff(path, box=None, samples=24):
     anchor = tabby[0] if tabby else clusters[0]
     (y0, y1, sp, n, x0, x1), count = anchor
 
+    # Some videos draw each page a little higher or lower. Positions of one staff overlap
+    # each other (two staves on one screen never do), so the box takes in all of them;
+    # otherwise the pages drawn highest lose their top string.
+    for fy0, fy1, fsp, fn, fx0, fx1 in found:
+        if fn == n and abs(fsp - sp) < sp * 0.15 and fy0 < y1 and fy1 > y0                 and min(x1, fx1) - max(x0, fx0) > 0.6 * min(x1 - x0, fx1 - fx0):
+            y0, y1, x0, x1 = min(y0, fy0), max(y1, fy1), min(x0, fx0), max(x1, fx1)
+
     # Staves drawn right above or below as part of the same system (notation over tab,
     # or two tab lines at once) come along, so the box never cuts a score in half.
     grew = True
@@ -167,8 +174,14 @@ def guess_region(path):
     y0, y1, sp, _, x0, x1 = staff
     cap = cv2.VideoCapture(path)
     dur = video_duration(cap)
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
-    return grow_box(luminance(_median_frame(path, dur)), x0, x1, y0, y1, sp)
+    x, y, w, h = grow_box(luminance(_median_frame(path, dur)), x0, x1, y0, y1, sp)
+    # The median frame shows the panel where it sits most of the time. When it moves
+    # between pages the growth can stop short of the staff's highest or lowest position,
+    # so always keep every string plus the digits written on it.
+    top, bot = max(0, min(y, int(y0 - 0.75 * sp))), min(H, max(y + h, int(y1 + 0.75 * sp) + 1))
+    return x, top, w, bot - top
 
 
 def _median_frame(path, dur, n=9):
@@ -214,6 +227,20 @@ def grow_box(gray, x0, x1, y0, y1, sp):
     while right < W - 1 and right - x1 < 1.5 * sp and plain(gray[top:bot, right + 1]):
         right += 1
     return (left, top, right - left + 1, bot - top + 1)
+
+
+def on_panel(crop):
+    """The crop with rows at its top and bottom edge that aren't the tab panel filled in
+    from the panel's edge. The box is sized for every page, so when a video draws a page
+    lower, the top of the box shows the video behind the panel."""
+    g = luminance(crop)
+    plain = np.nonzero(np.abs(np.median(g, axis=1) - np.median(g)) < 28)[0]
+    if not len(plain) or (plain[0] == 0 and plain[-1] == len(g) - 1):
+        return crop
+    top, bot = plain[0], plain[-1]
+    crop = crop.copy()
+    crop[:top], crop[bot + 1:] = crop[top], crop[bot]
+    return crop
 
 
 def ink(bgr, sp):
@@ -274,6 +301,28 @@ class Strip:
         self.color = crop.copy()        # latest raw pixels, for "keep original colours"
         self.x = 0
         self.t0 = self.t1 = t
+        self.looks = []         # per-column brightness of recent frames, for played_again
+        self.head = None        # furthest the playhead/highlight has got on this page, 0..1
+
+    def played_again(self, crop):
+        """A page played twice stays on screen unchanged; only the highlight or playhead
+        jumps back to the start. Columns that differ from how this page usually looks show
+        where it is. A big jump back to the left means the page is starting over."""
+        if self.sum.shape[1] != crop.shape[1]:
+            return False        # scrolled strip: the tab moves, not a playhead
+        look = np.median(luminance(crop), axis=0)
+        self.looks = self.looks[-40:] + [look]
+        if len(self.looks) < 4:
+            return False
+        off = np.nonzero(np.abs(look - np.median(self.looks, axis=0)) > 20)[0]
+        if len(off) < len(look) * 0.005:
+            return False        # no highlight in sight
+        pos = float(np.median(off)) / len(look)
+        # against the furthest point reached: at 4 frames a second the jump back can be
+        # caught halfway
+        far = max(self.head, pos) if self.head is not None else pos
+        self.head = pos if pos < far - 0.35 else far
+        return pos < far - 0.35
 
     def add(self, img, crop, dx, t):
         self.x += dx
@@ -359,6 +408,50 @@ def overlap_score(prev, cur, dx):
     return float((a * b).sum() / d) if d > 0 else 0.0
 
 
+def page_systems(page, target_sp=22.0):
+    """Tab on a still page (a PDF page, a screenshot): one cropped BGR image per system,
+    top to bottom, plus the string spacing and line count. A system is a tab staff and
+    whatever is written over it, notation staff included, down to the rhythm stems below.
+
+    The page is scaled so strings sit about target_sp apart, the same range video strips
+    come in at, so the reader and its bar images don't end up enormous.
+    Returns ([crop], sp, n) or ([], None, None)."""
+    staves = find_staves(page)
+    if not staves:
+        return [], None, None
+    counts = [s[3] for s in staves]
+    n = 6 if 6 in counts else max(set(counts), key=counts.count)
+    sp = float(np.median([s[2] for s in staves if s[3] == n]))
+    main = [s for s in staves if s[3] == n and abs(s[2] - sp) < sp * 0.2]
+    k = min(1.0, target_sp / sp)
+    if k < 1:
+        page = cv2.resize(page, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        main = [(a * k, b * k, c * k, m, int(x0 * k), int(x1 * k)) for a, b, c, m, x0, x1 in main]
+        staves = [(a * k, b * k, c * k, m, int(x0 * k), int(x1 * k)) for a, b, c, m, x0, x1 in staves]
+        sp *= k
+    H, W = page.shape[:2]
+    # anything staff-like between one tab staff and the next sits on top of the next
+    tops, lefts, rights = [], [], []
+    for i, (y0, y1, _, _, x0, x1) in enumerate(main):
+        prev = main[i - 1][1] if i else -1
+        above = [o for o in staves if o not in main and prev < o[0] and o[1] < y0]
+        tops.append(min([o[0] for o in above] + [y0]))
+        lefts.append(min([o[4] for o in above] + [x0]))
+        rights.append(max([o[5] for o in above] + [x1]))
+    out = []
+    for i, (y0, y1, _, _, x0, x1) in enumerate(main):
+        lo = tops[i] - 4 * sp
+        if i:
+            lo = max(lo, (main[i - 1][1] + tops[i]) / 2)
+        hi = y1 + 4 * sp
+        if i + 1 < len(main):
+            hi = min(hi, (y1 + tops[i + 1]) / 2)
+        a, b = max(0, int(lo)), min(H, int(hi))
+        l, r = max(0, int(lefts[i] - sp)), min(W, int(rights[i] + sp))
+        out.append(page[a:b, l:r])
+    return out, sp, n
+
+
 # Measured on the test set: unchanged strips score ~0.99, swaps between similar-looking
 # strips reach ~0.64, so "same" needs a high bar. Scrolls blur a little, so they get less.
 SAME = 0.85
@@ -394,7 +487,7 @@ def scan(path, region, fps=4.0, on_progress=None, on_strip=None):
         if on_progress and i % (step * 8) == 1:
             on_progress(min(1.0, i / total))
 
-        crop = frame[y:y + h, x:x + w]
+        crop = on_panel(frame[y:y + h, x:x + w])
         img = ink(crop, sp)
         if not has_staff(img, sp):
             continue                     # intro, talking head, end screen
@@ -403,8 +496,15 @@ def scan(path, region, fps=4.0, on_progress=None, on_strip=None):
         if cur is not None:
             dx, score = match_shift(ref, small)
             # unchanged, or a small step of a smooth scroll: take it straight away
-            if dx is not None and ((abs(dx) <= 2 and score >= SAME) or
-                                   (2 < dx < small.shape[1] * 0.25 and score >= SCROLL)):
+            same = dx is not None and abs(dx) <= 2 and score >= SAME
+            if same and cur.played_again(crop):
+                cur = Strip(img, crop, t)           # a repeat: the page goes in again
+                strips.append(cur)
+                if on_strip:
+                    on_strip(len(strips))
+                ref, pending = small, None
+                continue
+            if same or (dx is not None and 2 < dx < small.shape[1] * 0.25 and score >= SCROLL):
                 cur.add(img, crop, 0 if dx <= 2 else dx * 2, t)   # back to full resolution
                 ref, pending = small, None
                 continue

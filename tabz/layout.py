@@ -302,11 +302,12 @@ def label_bands(images, sp, n=None):
     return out
 
 
-def segments(strips, screen_w, n=None):
+def segments(strips, screen_w, n=None, bars=False):
     """Units for the Play view, which reflows them to any width.
 
     Scrolled strips are cut into single bars so lines can break anywhere a bar ends.
-    Swapped pages stay whole. Everything is scaled to one string spacing.
+    Swapped pages stay whole, unless bars is set (lines of a PDF, which are one long
+    piece of music broken only by the page edge). Everything is scaled to one string spacing.
     Returns ([{"img", "staff_y", "group", "kind"}], unit_px, sp_ref).
     """
     infos = [StripInfo(img, None, sp, n) for img, sp in strips]
@@ -314,7 +315,7 @@ def segments(strips, screen_w, n=None):
     out = []
     for g, i in enumerate(infos):
         s = sp_ref / i.sp
-        scrolled = (i.x_end - i.x_start) > screen_w * 1.3
+        scrolled = bars or (i.x_end - i.x_start) > screen_w * 1.3
         bounds = [i.x_start, i.x_end]
         if scrolled:
             cuts = [c for c in i.cuts[0] if i.x_start < c < i.x_end]
@@ -472,10 +473,10 @@ def draw_header(c, meta, x, top, width, art=None):
                         datetime.date.today().strftime("%d %b %Y").lstrip("0")) if b]
     lead = "   ·   ".join(bits) + "   ·   "
     text("Plex", 8.5, 0.42, lead, x, y)
-    url = meta["url"].replace("https://", "").replace("www.", "")
+    url = (meta.get("url") or "").replace("https://", "").replace("www.", "")
     ux = x + pdfmetrics.stringWidth(lead, "Plex", 8.5)
     text("PlexMono", 8.5, 0, url, ux, y, ACCENT)
-    if c is not None:
+    if c is not None and url:                 # a video from disk has no link
         c.linkURL(meta["url"], (ux, y - 3, ux + pdfmetrics.stringWidth(url, "PlexMono", 8.5), y + 9))
     y -= 12
     if c is not None:

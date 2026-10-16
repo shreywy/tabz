@@ -1,5 +1,5 @@
 """Background queue. Videos move through download -> locate -> area check -> scan while the
-window stays free for browsing, reading and adding more.
+window stays free for browsing, reading and adding more. File imports run here too.
 
 Downloads are network-bound, so several run at once. Locating and scanning are CPU-bound,
 so only as many run as the machine has room for. A video waiting for its area check
@@ -7,21 +7,23 @@ holds no slot, so the rest keep moving.
 """
 import itertools
 import os
+import shutil
 import threading
 import time
 
 import cv2
 
-from . import download, info, layout, vision
+from . import download, imports, info, layout, vision
 
 AREA_WAIT = 15          # seconds the area guess waits for a look before going ahead
 DOWNLOADS = 3           # downloads at once
 CPU_SLOTS = 2 if (os.cpu_count() or 4) >= 8 else 1   # locate/scan at once
+STALL = 600             # seconds a working stage may go without any progress before it's dropped
 
 _ids = itertools.count(1)
 
 WAITING = ("queued", "downloaded", "area", "ready")
-WORKING = ("download", "locate", "scan", "read", "save")
+WORKING = ("download", "locate", "scan", "read", "save", "import")
 FINISHED = ("done", "failed", "skipped", "cancelled")
 
 
@@ -47,10 +49,13 @@ class Job:
         self.deadline = 0
         self.found = 0
         self.cancel = False
+        self.touched = 0            # last sign of life from the working stage
+        self.kind = "video"         # or "import": a batch of files from disk
+        self.paths = []
 
     def view(self):
         return {
-            "id": self.id, "url": self.url, "title": self.title, "collection": self.collection,
+            "id": self.id, "kind": self.kind, "url": self.url, "title": self.title, "collection": self.collection,
             "status": self.status, "progress": round(self.progress, 3), "detail": self.detail,
             "error": self.error, "song": self.song, "area": self.area, "found": self.found,
             "held": self.held, "left": max(0, round(self.deadline - time.time())) if self.status == "area" else None,
@@ -84,6 +89,49 @@ class Queue:
         self.changed()
         self.wake.set()
         return job
+
+    def add_import(self, paths):
+        """Bring in files and folders from disk. Runs at once, beside the video queue."""
+        names = [os.path.basename(p.rstrip("/\\")) or p for p in paths]
+        job = Job("", title=names[0] if len(names) == 1 else f"{names[0]} and {len(names) - 1} more")
+        job.kind, job.paths = "import", list(paths)
+        job.status, job.detail, job.touched = "import", "Reading files", time.time()
+        with self.lock:
+            self.jobs.append(job)
+        threading.Thread(target=self._guard, args=(self._import, job), daemon=True).start()
+        self.changed()
+        return job
+
+    def _import(self, job):
+        sources, skipped = imports.collect(job.paths)
+        self._step(job, "import", f"Checking {len(sources)} files for copies")
+        songs, dupes, loose = imports.plan(sources, self.lib.known())
+        made, failed, videos = 0, [], 0
+        for k, song in enumerate(songs):
+            self._step(job, "import", f"{k + 1} of {len(songs)}: {song.title}", k / max(1, len(songs)))
+            if song.kind == "video":
+                if not song.main.member:          # a video inside a zip is left alone
+                    self.add(song.main.path, area_wait=0, title=song.title)
+                    videos += 1
+                continue
+            try:
+                imports.build(self.lib, song)
+                made += 1
+            except Exception:
+                failed.append(song.main.name)
+            if made % 15 == 1:
+                self.emit("library")
+        bits = [f"{made} {'song' if made == 1 else 'songs'} added"]
+        if videos:
+            bits.append(f"{videos} {'video' if videos == 1 else 'videos'} queued")
+        if dupes:
+            bits.append(f"{dupes} copies skipped")
+        if skipped or failed:
+            bits.append(f"{len(skipped) + len(failed)} files tabz can't read")
+        job.status, job.progress, job.detail = "done", 1.0, " · ".join(bits)
+        job.error = ("Couldn't read: " + ", ".join((failed + skipped)[:12])) if failed or skipped else None
+        self.emit("library")
+        self.emit("import_done", {"title": job.title, "detail": job.detail, "made": made})
 
     def _fill_title(self, job):
         t = download.peek_title(job.url)
@@ -143,46 +191,60 @@ class Queue:
     # ---- scheduling ---------------------------------------------------------------
     def _schedule(self):
         while True:
-            starts = []
-            with self.lock:
-                now = time.time()
-                for j in self.jobs:
-                    if j.cancel and j.status in WAITING:
-                        j.status = "cancelled"
-                        self._drop_video(j)
-                    elif j.status == "area" and (j.confirmed or (not j.held and now >= j.deadline)):
-                        j.status, j.detail = "ready", "Waiting for a free slot"
-                downloads = sum(j.status == "download" for j in self.jobs)
-                cpu = sum(j.status in ("locate", "scan", "read", "save") for j in self.jobs)
-                # finish songs before starting new ones: scans first, then locating
-                for j in self.jobs:
-                    if cpu < CPU_SLOTS and j.status == "ready":
-                        j.status, j.progress, j.detail = "scan", 0.0, "Watching for new bars"
-                        cpu += 1
-                        starts.append((self._scan, j))
-                for j in self.jobs:
-                    if cpu < CPU_SLOTS and j.status == "downloaded":
-                        j.status, j.progress, j.detail = "locate", 0.0, "Finding the tab and reading song details"
-                        cpu += 1
-                        starts.append((self._locate, j))
-                for j in self.jobs:
-                    if downloads < DOWNLOADS and j.status == "queued":
-                        j.status, j.progress, j.detail = "download", 0.0, "Video only, no audio"
-                        downloads += 1
-                        starts.append((self._download, j))
-            for fn, j in starts:
-                threading.Thread(target=self._guard, args=(fn, j), daemon=True).start()
-            if starts or self._pending:
-                self._last_emit = 0
-                self.changed()
+            try:
+                self._tick()
+            except Exception:
+                pass            # one bad pass must not stop the queue for good
             self.wake.wait(0.25)
             self.wake.clear()
+
+    def _tick(self):
+        starts = []
+        with self.lock:
+            now = time.time()
+            for j in self.jobs:
+                if j.status in WORKING and now - j.touched > STALL:
+                    # stuck (a download or decode that never returns): free its slot
+                    # so the rest of a playlist keeps going
+                    j.cancel = True
+                    j.status = "skipped" if j.collection else "failed"
+                    j.error = "Stopped responding, so tabz moved on. Try this one again on its own."
+                elif j.cancel and j.status in WAITING:
+                    j.status = "cancelled"
+                    self._drop_video(j)
+                elif j.status == "area" and (j.confirmed or (not j.held and now >= j.deadline)):
+                    j.status, j.detail = "ready", "Waiting for a free slot"
+            downloads = sum(j.status == "download" for j in self.jobs)
+            cpu = sum(j.status in ("locate", "scan", "read", "save") for j in self.jobs)
+            # finish songs before starting new ones: scans first, then locating
+            for j in self.jobs:
+                if cpu < CPU_SLOTS and j.status == "ready":
+                    j.status, j.progress, j.detail = "scan", 0.0, "Watching for new bars"
+                    cpu += 1
+                    starts.append((self._scan, j))
+            for j in self.jobs:
+                if cpu < CPU_SLOTS and j.status == "downloaded":
+                    j.status, j.progress, j.detail = "locate", 0.0, "Finding the tab and reading song details"
+                    cpu += 1
+                    starts.append((self._locate, j))
+            for j in self.jobs:
+                if downloads < DOWNLOADS and j.status == "queued":
+                    j.status, j.progress, j.detail = "download", 0.0, "Video only, no audio"
+                    downloads += 1
+                    starts.append((self._download, j))
+        for fn, j in starts:
+            j.touched = time.time()
+            threading.Thread(target=self._guard, args=(fn, j), daemon=True).start()
+        if starts or self._pending:
+            self._last_emit = 0
+            self.changed()
 
     def _guard(self, fn, job):
         try:
             fn(job)
         except Cancelled:
-            job.status = "cancelled"
+            if job.status not in FINISHED:      # dropped as stuck keeps its message
+                job.status = "cancelled"
             self._drop_video(job)
         except Exception as e:
             job.status = "skipped" if job.collection else "failed"
@@ -200,6 +262,7 @@ class Queue:
     def _step(self, job, status, detail="", progress=0.0):
         self._check(job)
         job.status, job.detail, job.progress = status, detail, progress
+        job.touched = time.time()
         self.changed()
 
     def _progress(self, job, every=0.02):
@@ -207,6 +270,7 @@ class Queue:
 
         def cb(p):
             self._check(job)
+            job.touched = time.time()
             if p - last[0] >= every or p >= 1:
                 last[0] = p
                 job.progress = p
@@ -215,6 +279,17 @@ class Queue:
 
     # ---- stages ---------------------------------------------------------------------
     def _download(self, job):
+        if os.path.isfile(job.url):             # a video file from disk: work on a copy
+            os.makedirs(download.TEMP_DIR, exist_ok=True)
+            job.video = os.path.join(download.TEMP_DIR, f"local-{job.id}{os.path.splitext(job.url)[1]}")
+            shutil.copyfile(job.url, job.video)
+            cap = cv2.VideoCapture(job.video)
+            dur = vision.video_duration(cap)
+            cap.release()
+            job.meta = {"id": self.lib.new_id(job.title), "title": job.title, "url": "", "channel": "",
+                        "duration": dur, "description": ""}
+            job.status, job.detail = "downloaded", "Waiting for a free slot"
+            return
         job.video, job.meta = download.download(job.url, on_progress=self._progress(job))
         job.title = job.meta["title"]
         self._check(job)

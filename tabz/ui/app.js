@@ -5,11 +5,11 @@ const api = () => window.pywebview.api;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
 const state = {
-  screen: "home",
-  prev: "home",           // where to go back to from the area check / review
+  screen: "library",
+  prev: "library",        // where to go back to from the area check / review
   settings: {},
   library: [],
-  coll: "__all",
+  group: "all",           // how the library is grouped: all, recent, artist, genre, guitar, kind, collection, folder
   sort: "recent",
   view: "cards",
   jobs: [],
@@ -19,7 +19,7 @@ const state = {
   review: null,
   removed: new Set(),
 };
-try { state.view = localStorage.getItem("tabz.libview") || "cards"; } catch {}
+try { state.view = localStorage.getItem("tabz.libview") || "cards"; state.group = localStorage.getItem("tabz.group") || "all"; } catch {}
 
 // ---- helpers -------------------------------------------------------------------
 const clock = (s) => { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
@@ -85,14 +85,16 @@ function show(screen) {
   if (state.screen !== screen && !["area", "review", "play"].includes(state.screen)) state.prev = state.screen;
   state.screen = screen;
   $$(".screen").forEach((s) => s.classList.toggle("on", s.dataset.screen === screen));
-  $$(".nav button").forEach((b) => b.classList.toggle("on", b.dataset.go === screen));
+  $$(".nav [data-go]").forEach((b) => b.classList.toggle("on", b.dataset.go === screen));
+  $$("#browse button").forEach((b) => b.classList.toggle("on", screen === "library" && b.dataset.group === state.group));
 }
 
 async function go(where) {
   if (state.screen === "review") await api().close_review();
   if (state.screen === "play") leavePlay(true);
-  if (where === "library") { await refreshLibrary(); show("library"); }
-  else { show("home"); refreshLibrary(); $("#url").focus(); }
+  if (where === "library") { await refreshLibrary(); show("library"); renderLibrary(); }
+  else if (where === "explore") { await refreshLibrary(); show("explore"); renderExplore(); }
+  else { show("add"); refreshLibrary(); $("#url").focus(); }
 }
 
 // ---- theme ---------------------------------------------------------------------------
@@ -111,10 +113,10 @@ window.tabz = { on(event, data) { handlers[event]?.(data); } };
 
 const STATUS = {
   queued: "Waiting", download: "Downloading", downloaded: "Downloaded", locate: "Reading", area: "Check area",
-  ready: "Ready to scan", scan: "Scanning",
+  ready: "Ready to scan", scan: "Scanning", import: "Importing",
   read: "Chords", save: "Saving", done: "Done", failed: "Failed", skipped: "Skipped", cancelled: "Cancelled",
 };
-const ACTIVE = ["queued", "download", "downloaded", "locate", "area", "ready", "scan", "read", "save"];
+const ACTIVE = ["queued", "download", "downloaded", "locate", "area", "ready", "scan", "read", "save", "import"];
 
 const handlers = {
   jobs(list) {
@@ -125,6 +127,14 @@ const handlers = {
       if (j.status === "area" && before.get(j.id) !== "area") onAreaReady(j);
       if (state.area?.job.id === j.id) syncArea(j);
     }
+  },
+  library() {
+    clearTimeout(handlers.libT);
+    handlers.libT = setTimeout(() => { refreshLibrary(); window.gpScanPending?.(); }, 400);
+  },
+  import_done(r) {
+    handlers.library();
+    toast(`Import finished: ${r.detail}.`, [["Show library", () => go("library")]], 12000);
   },
   job_done(j) {
     refreshLibrary();
@@ -138,11 +148,10 @@ function renderQueue() {
   const active = state.jobs.filter((j) => ACTIVE.includes(j.status));
   const waiting = state.jobs.filter((j) => j.status === "area");
   const btn = $("#queue-btn");
-  btn.hidden = state.jobs.length === 0;
   btn.classList.toggle("busy", active.length > 0);
   btn.classList.toggle("attn", waiting.length > 0);
   $("#queue-badge").textContent = active.length || "";
-  const working = state.jobs.filter((j) => ["download", "locate", "scan", "read", "save"].includes(j.status));
+  const working = state.jobs.filter((j) => ["download", "locate", "scan", "read", "save", "import"].includes(j.status));
   const scanning = working.find((j) => j.status === "scan");
   $("#queue-label").textContent = waiting.length ? "Check area"
     : working.length > 1 ? `${working.length} working`
@@ -157,13 +166,15 @@ function renderQueue() {
       if (group) html += `<li class="q-group">${esc(group)}</li>`;
     }
     const pct = Math.round(j.progress * 100);
-    const showBar = ["download", "scan"].includes(j.status);
+    if (j.kind === "import") j.title = `Files: ${j.title}`;
+    const showBar = ["download", "scan", "import"].includes(j.status);
     let sub = j.error || j.detail || "";
     if (j.status === "scan" && j.found) sub = `${j.found} ${j.found === 1 ? "strip" : "strips"} so far`;
     if (j.status === "area") sub = j.held ? "Waiting for you" : `Going ahead with the guess in ${j.left}s`;
     if (j.status === "done" && j.notes) sub = j.notes;
     const acts = [];
     if (j.status === "area") acts.push(`<button class="link-btn" data-q="area" data-id="${j.id}">Check area</button>`);
+    if (j.status === "done" && j.kind === "import") acts.push(`<button class="link-btn" data-q="library" data-id="${j.id}">Show library</button>`);
     if (j.status === "done" && j.song) acts.push(`<button class="link-btn" data-q="open" data-id="${j.id}">Open</button>`, `<button class="link-btn" data-q="review" data-id="${j.id}">Review</button>`);
     if (ACTIVE.includes(j.status)) acts.push(`<button class="link-btn" data-q="cancel" data-id="${j.id}">Cancel</button>`);
     html += `<li class="qitem ${j.status}">
@@ -194,6 +205,7 @@ $("#queue-list").addEventListener("click", (e) => {
   if (b.dataset.q === "open") { toggleQueue(false); openSong(j.song, state.screen); }
   if (b.dataset.q === "review") { toggleQueue(false); openReview(j.song); }
   if (b.dataset.q === "cancel") api().job_cancel(j.id);
+  if (b.dataset.q === "library") { toggleQueue(false); go("library"); }
 });
 
 // ---- new: link, playlist or search ------------------------------------------------------------
@@ -239,9 +251,9 @@ async function addLink(url, whole) {
 let searchId = 0;
 async function search(q) {
   const id = ++searchId;
-  $(".home").classList.add("searched");
+
   $("#results-wrap").hidden = false;
-  $("#recent-wrap").hidden = true;
+
   $("#results-title").textContent = `Results for “${q}”`;
   $("#results").innerHTML = Array.from({ length: 8 }, () => `<li class="result skeleton"><div class="thumb"></div><b></b></li>`).join("");
   const res = await api().search(q);
@@ -278,7 +290,7 @@ function onAreaReady(j) {
   if (state.told.has(j.id)) return;
   state.told.add(j.id);
   // the user just added this one and isn't busy elsewhere: show it straight away
-  const idle = ["home", "library"].includes(state.screen) && $("#dialog").hidden;
+  const idle = ["add", "library"].includes(state.screen) && $("#dialog").hidden;
   if (state.watch === j.id && idle) return openArea(j);
   if (!j.collection) toast(`Check the tab area for “${j.title}”`, [["Check", () => openArea(j)]], 14000);
 }
@@ -412,29 +424,113 @@ async function refreshLibrary() {
   state.library = await api().library();
   $("#lib-count").textContent = state.library.length || "";
   renderRecent();
-  renderRail();
+  if (state.screen === "explore") renderExplore();
+  $("#coll-names").innerHTML = groupsOf("collection").map(([n]) => `<option value="${esc(n)}">`).join("");
+  $("#genre-names").innerHTML = groupsOf("genre").map(([n]) => `<option value="${esc(n)}">`).join("");
   renderLibrary();
 }
 
-function cardHtml(it, compact) {
-  const i = it.info || {};
-  const song = i.song || it.name;
-  const thumb = it.thumb
-    ? `<div class="tab-thumb"><img src="${it.thumb}" alt="" loading="lazy"></div>`
-    : `<div class="tab-thumb pdf">PDF only</div>`;
+const KIND = { gp: "Guitar Pro", pdf: "PDF", image: "Picture", video: "Video" };
+const LEVELS = ["", "Beginner", "Easy", "Intermediate", "Hard", "Expert"];
+
+// ---- versions: the same song saved more than once is one card ---------------------------
+// "Rose - Gone (Lead Guitar)", "(Rhythm Guitar)" and the Guitar Pro file are one song with
+// three versions. Same title (brackets and words like "lead", "simple", "tab" aside) and the
+// same artist, or no artist on one side.
+const foldText = (s) => String(s || "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
+const VERSION_WORDS = /\b(tabs?|tablature|guitar|guitars|fingerstyle|acoustic|electric|version|simple|easy|lead|rhythm|both|vocal|cover|arrangement|full|intro|solo|official|pdf)\b/g;
+const titleKey = (it) => foldText(it.info?.song || it.name).replace(/[([{].*?[)\]}]/g, " ").replace(VERSION_WORDS, " ").replace(/[^a-z0-9]+/g, "");
+const artistKey = (it) => foldText(it.info?.artist).replace(/\bthe\b/g, "").replace(/[^a-z0-9]+/g, "");
+const KIND_ORDER = { gp: 0, pdf: 1, video: 2, image: 3 };
+
+function groupVersions(items) {
+  // "Twice - The Feels (Simple Version)": a file named "artist - song" with no artist of its
+  // own matches on whichever half is another song's title
+  const titles = new Map();          // title -> artists it has
+  for (const it of items) {
+    if (!it.info?.artist) continue;
+    const k = titleKey(it);
+    titles.has(k) || titles.set(k, new Set());
+    titles.get(k).add(artistKey(it));
+  }
+  const keyOf = (it) => {
+    const k = titleKey(it);
+    if (it.info?.artist || titles.has(k)) return k;
+    const parts = (it.info?.song || it.name).split(/\s+-\s+/).map((p) => titleKey({ name: p }));
+    if (parts.length < 2) return k;
+    // the half that's a song by the artist named in the other half; else the last one known
+    const byArtist = parts.find((p, i) => titles.get(p) && parts.some((q, j) => j !== i && titles.get(p).has(q)));
+    return byArtist || [...parts].reverse().find((p) => titles.has(p)) || k;
+  };
+  const byTitle = new Map();
+  for (const it of items) {
+    if (!it.song) { byTitle.set(Symbol(), [it]); continue; }
+    const k = keyOf(it) || it.song;
+    byTitle.has(k) || byTitle.set(k, []);
+    byTitle.get(k).push(it);
+  }
+  const out = [];
+  for (const list of byTitle.values()) {
+    const artists = [...new Set(list.map(artistKey).filter(Boolean))];
+    const groups = new Map();
+    for (const it of list) {
+      // no artist: joins the one artist this title has, if there's only one
+      const a = artistKey(it) || (artists.length === 1 ? artists[0] : "");
+      groups.has(a) || groups.set(a, []);
+      groups.get(a).push(it);
+    }
+    for (const g of groups.values()) {
+      g.sort((x, y) => (KIND_ORDER[x.kind] ?? 2) - (KIND_ORDER[y.kind] ?? 2) || (y.played || 0) - (x.played || 0) || (y.created || 0) - (x.created || 0));
+      const lead = g[0];
+      lead.versions = g;
+      for (const v of g) v.lead = lead;
+      out.push(lead);
+    }
+  }
+  return out;
+}
+const isFav = (it) => (it.versions || [it]).some((v) => v.fav);
+
+// a picture for songs with no cover art and no tab preview: a colour from the title
+function placeholder(it) {
+  let h = 0;
+  for (const c of it.info?.song || it.name) h = (h * 31 + c.charCodeAt(0)) % 360;
+  const words = (it.info?.song || it.name).replace(/[^\p{L}\p{N} ]/gu, "").split(/\s+/).filter(Boolean);
+  return `<div class="tab-thumb blank" style="--h:${h}"><span>${esc((words[0]?.[0] || "") + (words[1]?.[0] || "")).toUpperCase()}</span></div>`;
+}
+
+function cardHtml(it, compact, i = 0) {
+  const info = it.info || {};
+  const song = info.song || it.name;
+  const thumb = it.art ? `<div class="tab-thumb cover"><img src="${it.art}" alt="" loading="lazy"></div>`
+    : it.thumb ? `<div class="tab-thumb"><img src="${it.thumb}" alt="" loading="lazy"></div>`
+    : placeholder(it);
+  const vs = it.versions || [it];
+  const tags = [];
+  if (!compact) {
+    tags.push(`<span class="tag">${KIND[it.kind] || "Video"}</span>`);
+    if (it.guitar) tags.push(`<span class="tag">${esc(it.guitar)}</span>`);
+    if (info.style) tags.push(`<span class="tag">${esc(info.style)}</span>`);
+    if (info.level) tags.push(`<span class="tag lvl l${info.level}">${LEVELS[info.level]}</span>`);
+    if (it.kind !== "gp" && it.playable) tags.push(`<span class="tag" title="The notes were read from the tab, so you can hear it and save it as a Guitar Pro file">Playable</span>`);
+    if (vs.some((v) => v.backing)) tags.push(`<span class="tag bt">Backing track</span>`);
+    if (vs.length > 1) tags.push(`<span class="tag ver">${vs.length} versions</span>`);
+  }
+  const sub = [info.artist, info.year].filter(Boolean).join(" · ");
   return `
-    <li class="card" data-key="${esc(it.song || it.path)}">
+    <li class="card" data-key="${esc(it.song || it.path)}" style="--i:${i}">
       ${thumb}
+      ${it.song ? `<button class="star ${isFav(it) ? "on" : ""}" data-card="star" title="${isFav(it) ? "Take out of favorites" : "Add to favorites"}" aria-label="Favorite" aria-pressed="${isFav(it)}">
+        <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="m10 2.8 2.2 4.6 5 .6-3.7 3.4 1 5-4.5-2.5-4.5 2.5 1-5L2.8 8l5-.6Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></button>` : ""}
       <div class="body">
         <div class="title-row">
-          ${it.art ? `<img class="art" src="${it.art}" alt="" loading="lazy">` : ""}
           <div><span class="song">${esc(song)}</span>
-          ${i.artist ? `<span class="artist">${esc([i.artist, i.year].filter(Boolean).join(" · "))}</span>` : ""}
-          ${!compact && it.collection && state.coll === "__all" ? `<span class="coll">${esc(it.collection)}</span>` : ""}</div>
+          ${sub ? `<span class="artist">${esc(sub)}</span>` : ""}</div>
         </div>
-        <div class="chips">${infoChips(i, { max: 8 })}</div>
+        ${tags.length ? `<div class="meta-row">${tags.join("")}</div>` : ""}
+        ${compact ? "" : `<div class="chips">${infoChips(info, { max: 5, chords: false })}</div>`}
         <div class="foot">
-          <span>${esc([it.channel, when(it.created || it.when)].filter(Boolean).join(" · "))}</span>
+          <span>${esc([it.genre, when(it.created || it.when)].filter(Boolean).join(" · "))}</span>
           <span class="acts"><button class="icon-btn" data-card="menu" title="More" aria-label="More">
             <svg viewBox="0 0 20 20" width="16" height="16"><circle cx="5" cy="10" r="1.5" fill="currentColor"/><circle cx="10" cy="10" r="1.5" fill="currentColor"/><circle cx="15" cy="10" r="1.5" fill="currentColor"/></svg>
           </button></span>
@@ -444,57 +540,168 @@ function cardHtml(it, compact) {
 }
 
 function renderRecent() {
-  const items = state.library.slice(0, 4);
-  $("#recent").innerHTML = items.map((it) => cardHtml(it, true)).join("");
+  const items = groupVersions(state.library).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 4);
+  $("#recent").innerHTML = items.map((it, i) => cardHtml(it, true, i)).join("");
   $("#recent-empty").hidden = items.length > 0;
 }
 
-function collections() {
-  const m = new Map();
-  for (const it of state.library) if (it.collection) m.set(it.collection, (m.get(it.collection) || 0) + 1);
-  return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+// what each grouping files a song under
+// one spelling per artist ("aespa", "Aespa" and "AESPA" are one): the most common one
+let artistNames = new Map();
+function nameArtists(items) {
+  const count = new Map();
+  for (const it of items) {
+    const a = it.info?.artist;
+    if (!a) continue;
+    const k = artistKey(it) || a;
+    count.has(k) || count.set(k, new Map());
+    count.get(k).set(a, (count.get(k).get(a) || 0) + 1);
+  }
+  artistNames = new Map([...count].map(([k, m]) => [k, [...m].sort((x, y) => y[1] - x[1] || (x[0] === x[0].toUpperCase()) - (y[0] === y[0].toUpperCase()))[0][0]]));
 }
+const GROUPS = {
+  artist: { title: "Artists", of: (it) => (it.info?.artist && artistNames.get(artistKey(it) || it.info.artist)) || "Unknown artist" },
+  genre: { title: "Genres", of: (it) => it.genre || "No genre yet" },
+  guitar: { title: "Acoustic or electric", of: (it) => it.guitar || "Not set" },
+  style: { title: "Playing style", of: (it) => it.info?.style || "Not read yet" },
+  level: { title: "Difficulty", of: (it) => (it.info?.level ? `${it.info.level} · ${LEVELS[it.info.level]}` : "Not rated yet") },
+  kind: { title: "Tab type", of: (it) => KIND[it.kind] || "Video" },
+  collection: { title: "Collections", of: (it) => it.collection || "Not in a collection" },
+  folder: { title: "Folders", of: (it) => it.folder || (it.kind === "video" || !it.kind ? "From YouTube" : "Unknown folder") },
+};
+const LAST = new Set(["Unknown artist", "No genre yet", "Not set", "Not read yet", "Not rated yet", "Not in a collection", "Unknown folder"]);
 
-function renderRail() {
-  $("#c-all").textContent = state.library.length || "";
-  $("#rail-colls").innerHTML = collections()
-    .map(([name, n]) => `<button class="rail-item" data-coll="${esc(name)}" title="${esc(name)}"><span>${esc(name)}</span><span class="count">${n}</span></button>`)
-    .join("");
-  $("#coll-names").innerHTML = collections().map(([n]) => `<option value="${esc(n)}">`).join("");
-  $$(".rail-item").forEach((b) => b.classList.toggle("on", b.dataset.coll === state.coll));
+function groupsOf(key) {
+  const m = new Map();
+  for (const it of state.library) {
+    const g = key === "genre" ? it.genre : key === "collection" ? it.collection : null;
+    if (g) m.set(g, (m.get(g) || 0) + 1);
+  }
+  return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 }
 
 function libraryItems() {
   const q = $("#lib-filter").value.trim().toLowerCase();
-  let items = state.library;
-  if (state.coll === "__recent") items = items.filter((it) => it.played).sort((a, b) => b.played - a.played).slice(0, 30);
-  else if (state.coll === "__loose") items = items.filter((it) => !it.collection);
-  else if (state.coll !== "__all") items = items.filter((it) => it.collection === state.coll);
+  let items = groupVersions(state.library);
+  if (isLink(q)) return [];                          // a link: offered as a new download instead
+  if (state.group === "recent") items = items.filter((it) => (it.versions || [it]).some((v) => v.played)).sort((a, b) => b.played - a.played).slice(0, 40);
+  if (state.group === "fav") items = items.filter(isFav);
   if (q) {
-    items = items.filter((it) => {
-      const i = it.info || {};
-      const hay = [it.name, i.song, i.artist, i.album, i.year, i.genre, it.channel, it.collection, i.key, i.tuning, ...(i.chords || []),
-        i.capo != null ? `capo ${i.capo}` : "", i.tempo ? `${i.tempo} bpm` : ""].join(" ").toLowerCase();
+    items = items.filter((it) => (it.versions || [it]).some((v) => {
+      const i = v.info || {};
+      const hay = [v.name, i.song, i.artist, i.album, i.year, v.genre, v.guitar, i.style, LEVELS[i.level], KIND[v.kind], v.channel, v.collection, v.folder,
+        i.key, i.tuning, ...(i.chords || []), i.capo != null ? `capo ${i.capo}` : "", i.tempo ? `${i.tempo} bpm` : ""].join(" ").toLowerCase();
       return q.split(/\s+/).every((w) => hay.includes(w));
-    });
+    }));
   }
   const key = (it) => (state.sort === "artist" ? it.info?.artist : it.info?.song || it.name) || "~";
-  if (state.sort !== "recent" && state.coll !== "__recent") items = [...items].sort((a, b) => key(a).localeCompare(key(b), undefined, { sensitivity: "base" }));
+  if (state.sort === "level") items = [...items].sort((a, b) => (a.info?.level || 9) - (b.info?.level || 9) || key(a).localeCompare(key(b)));
+  else if (state.sort !== "recent" && state.group !== "recent") items = [...items].sort((a, b) => key(a).localeCompare(key(b), undefined, { sensitivity: "base" }));
   return items;
 }
 
 function renderLibrary() {
   const items = libraryItems();
-  const titles = { __all: "All songs", __recent: "Played recently", __loose: "Not in a collection" };
-  $("#lib-title").textContent = titles[state.coll] || state.coll;
-  const ul = $("#library");
-  ul.className = `cards ${state.view === "list" ? "list" : ""}`;
-  ul.innerHTML = items.map((it) => cardHtml(it, false)).join("");
+  nameArtists(state.library);
+  const G = GROUPS[state.group];
+  $("#lib-title").textContent = G ? G.title : { recent: "Played recently", fav: "Favorites" }[state.group] || "All songs";
+  const box = $("#library"), cls = `cards ${state.view === "list" ? "list" : ""}`;
+  if (!G) {
+    box.innerHTML = `<ul class="${cls}">${items.map((it, i) => cardHtml(it, false, i)).join("")}</ul>`;
+    $("#jump").hidden = true;
+  } else {
+    const by = new Map();
+    for (const it of items) {
+      const g = G.of(it);
+      by.has(g) || by.set(g, []);
+      by.get(g).push(it);
+    }
+    const names = [...by.keys()].sort((a, b) => (LAST.has(a) - LAST.has(b)) || a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
+    box.innerHTML = names.map((g, k) => `
+      <section class="group-sec" id="grp-${k}">
+        <h2>${esc(g)} <span class="count">${by.get(g).length}</span></h2>
+        <ul class="${cls}">${by.get(g).map((it, i) => cardHtml(it, false, i)).join("")}</ul>
+      </section>`).join("");
+    $("#jump").innerHTML = names.length > 1
+      ? names.map((g, k) => `<button data-jump="${k}">${esc(g)}<span class="count">${by.get(g).length}</span></button>`).join("") : "";
+    $("#jump").hidden = names.length < 2;
+  }
+  const q = $("#lib-filter").value.trim();
   $("#library-empty").hidden = state.library.length > 0;
   $("#library-nomatch").hidden = !(state.library.length && !items.length);
+  $("#library-nomatch").innerHTML = isLink(q)
+    ? `That's a link. <button class="btn primary small" data-action="lib-link">Get tab from it</button> <span class="hint">or press Enter</span>`
+    : state.group === "fav" ? "No favorites yet. Star a song to keep it here." : "Nothing here matches.";
   $$("#lib-sort button").forEach((b) => b.classList.toggle("on", b.dataset.sort === state.sort));
   $$("#lib-view button").forEach((b) => b.classList.toggle("on", b.dataset.view === state.view));
 }
+
+// paste a link in the search box: open it if it's already here, otherwise get it
+async function libraryLink() {
+  const url = $("#lib-filter").value.trim();
+  const id = ytId(url);
+  const have = id && state.library.find((s) => ytId(s.url) === id || s.song === id);
+  if (have) return openSong(have.song, "library");
+  $("#lib-filter").value = "";
+  renderLibrary();
+  await addLink(url, hasList(url));
+}
+$("#lib-filter").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && isLink(e.target.value.trim())) libraryLink();
+});
+
+// ---- explore ----------------------------------------------------------------------------
+function shelf(title, items, more) {
+  if (!items.length) return "";
+  return `<section class="shelf"><div class="section-head"><h2>${esc(title)}</h2>${more ? `<button class="link-btn" data-more="${more}">See all</button>` : ""}</div>
+    <ul class="cards row">${items.slice(0, 14).map((it, i) => cardHtml(it, true, i)).join("")}</ul></section>`;
+}
+function shuffled(list, seed) {
+  // the same order all day, a new one tomorrow
+  const out = [...list];
+  let s = seed;
+  for (let i = out.length - 1; i > 0; i--) {
+    s = (s * 9301 + 49297) % 233280;
+    const j = Math.floor((s / 233280) * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+function renderExplore() {
+  const all = groupVersions(state.library).filter((it) => it.song);
+  const day = Math.floor(Date.now() / 864e5);
+  const played = all.filter((it) => it.versions.some((v) => v.played)).sort((a, b) => Math.max(...b.versions.map((v) => v.played || 0)) - Math.max(...a.versions.map((v) => v.played || 0)));
+  const fresh = shuffled(all.filter((it) => !it.versions.some((v) => v.played)), day);
+  const by = (f) => shuffled(all.filter(f), day + 7);
+  const genres = groupsOf("genre").sort((a, b) => b[1] - a[1]).slice(0, 3);
+  $("#shelves").innerHTML = [
+    shelf("Pick up where you left off", played, "recent"),
+    shelf("Favorites", all.filter(isFav), "fav"),
+    shelf("Not played yet", fresh),
+    shelf("Easy to start", by((it) => it.info?.level && it.info.level <= 2), "level"),
+    shelf("Fingerstyle", by((it) => it.info?.style === "Fingerstyle" || (it.guitar === "Acoustic" && it.info?.style !== "Chords & strumming")), "style"),
+    shelf("Chords and strumming", by((it) => it.info?.style === "Chords & strumming"), "style"),
+    shelf("Riffs and lead", by((it) => it.info?.style === "Riffs & lead"), "style"),
+    shelf("With a backing track", all.filter((it) => it.versions.some((v) => v.backing))),
+    ...genres.map(([g]) => shelf(g, by((it) => it.genre === g), "genre")),
+    shelf("A real workout", by((it) => it.info?.level >= 4), "level"),
+  ].join("") || `<p class="empty">Add some tabs and this fills up with things to play.</p>`;
+}
+$("#shelves").addEventListener("click", (e) => {
+  const more = e.target.closest("[data-more]")?.dataset.more;
+  if (more) {
+    state.group = more;
+    try { localStorage.setItem("tabz.group", state.group); } catch {}
+    return go("library");
+  }
+  onCardClick(e);
+});
+$("#surprise").onclick = () => {
+  const all = groupVersions(state.library).filter((it) => it.song);
+  const old = all.filter((it) => !it.versions.some((v) => v.played && Date.now() / 1000 - v.played < 7 * 864e2));
+  const pick = (old.length ? old : all)[Math.floor(Math.random() * (old.length || all.length))];
+  if (pick) openSong(pick.song, "explore");
+};
 
 $("#lib-filter").addEventListener("input", renderLibrary);
 $("#lib-sort").addEventListener("click", (e) => {
@@ -508,15 +715,22 @@ $("#lib-view").addEventListener("click", (e) => {
   try { localStorage.setItem("tabz.libview", state.view); } catch {}
   renderLibrary();
 });
-$(".lib-rail").addEventListener("click", (e) => {
-  const b = e.target.closest(".rail-item");
+$("#browse").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-group]");
   if (!b) return;
-  state.coll = b.dataset.coll;
-  renderRail();
+  state.group = b.dataset.group;
+  try { localStorage.setItem("tabz.group", state.group); } catch {}
+  if (state.screen !== "library") await go("library");
+  show("library");
   renderLibrary();
+  $("#lib-main").scrollTop = 0;
+});
+$("#jump").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-jump]");
+  if (b) $(`#grp-${b.dataset.jump}`).scrollIntoView({ block: "start" });
 });
 
-const findItem = (key) => state.library.find((x) => (x.song || x.path) === key);
+const findItem = (key) => { const it = state.library.find((x) => (x.song || x.path) === key); return it?.lead || it; };
 
 function onCardClick(e) {
   const card = e.target.closest(".card");
@@ -525,18 +739,32 @@ function onCardClick(e) {
   if (!it) return;
   const menuBtn = e.target.closest("[data-card=menu]");
   if (menuBtn) return openMenu(it, menuBtn);
+  const star = e.target.closest("[data-card=star]");
+  if (star) return toggleFav(it, star);
   if (it.song) openSong(it.song, state.screen);
   else api().open_path(it.path);
 }
 $("#library").addEventListener("click", onCardClick);
+$("#library-nomatch").addEventListener("click", (e) => { if (e.target.closest("[data-action=lib-link]")) libraryLink(); });
+
+function toggleFav(it, btn) {
+  const on = !isFav(it);
+  for (const v of it.versions || [it]) {
+    if (v.fav !== on && (on ? v === it : true)) { v.fav = on; api().set_song(v.song, { fav: on }); }
+  }
+  btn.classList.toggle("on", on);
+  btn.setAttribute("aria-pressed", String(on));
+  btn.title = on ? "Take out of favorites" : "Add to favorites";
+  if (state.group === "fav" && !on) renderLibrary();
+}
 $("#recent").addEventListener("click", onCardClick);
 
 function openMenu(it, anchor) {
   const m = $("#card-menu");
   const items = [];
-  if (it.song) items.push(["play", "Open in reader"]);
-  if (it.song && it.editable) items.push(["review", "Review and edit"]);
-  if (it.path) items.push(["pdf", "Open PDF"], ["folder", "Show PDF in folder"]);
+  if (it.song) items.push(["play", "Open"], ["details", "Edit details"], ["backing", it.backing ? "Backing track" : "Add a backing track"]);
+  if (it.song && it.editable) items.push(["review", "Review the strips and PDF"]);
+  if (it.path) items.push(["-"], ["pdf", "Open PDF"], ["folder", "Show PDF in folder"]);
   if (it.url) items.push(["video", "Watch on YouTube"]);
   if (it.song) items.push(["-"], ["move", it.collection ? "Move to another collection" : "Add to a collection"]);
   if (it.song && it.collection) items.push(["unfile", `Take out of “${it.collection}”`]);
@@ -553,6 +781,8 @@ function openMenu(it, anchor) {
     m.hidden = true;
     const name = it.info?.song || it.name;
     if (k === "play") openSong(it.song, state.screen);
+    if (k === "details") editDetails(it.song, it.info || {}, it.guitar);
+    if (k === "backing") backingDialog(it.song, name);
     if (k === "review") openReview(it.song);
     if (k === "pdf") api().open_path(it.path);
     if (k === "folder") api().show_in_folder(it.path);
@@ -563,7 +793,8 @@ function openMenu(it, anchor) {
     }
     if (k === "unfile") { await api().set_song(it.song, { collection: null }); refreshLibrary(); }
     if (k === "delete") {
-      if (await ask(`Remove “${name}” from your library? Its PDF stays in the folder.`, { ok: "Remove", danger: true })) {
+      const pdfNote = it.kind === "video" || !it.kind ? " Its PDF stays in the folder." : " Your original files aren't touched.";
+      if (await ask(`Remove “${name}” from your library?${pdfNote}`, { ok: "Remove", danger: true })) {
         await api().delete_song(it.song);
         refreshLibrary();
       }
@@ -572,6 +803,84 @@ function openMenu(it, anchor) {
 }
 document.addEventListener("pointerdown", (e) => {
   if (!e.target.closest("#card-menu, [data-card=menu]")) $("#card-menu").hidden = true;
+});
+
+// ---- song details (any kind of song) ------------------------------------------------------
+let ddSong = null, ddDone = null;
+function editDetails(sid, info, guitar, done) {
+  ddSong = sid;
+  ddDone = done;
+  const f = $("#dd-form");
+  for (const k of ["song", "artist", "album", "genre", "tuning"]) f[k].value = info[k] || "";
+  f.capo.value = info.capo ?? "";
+  f.tempo.value = info.tempo || "";
+  f.guitar.value = info.guitar || guitar || "";
+  $("#details-dialog").hidden = false;
+  f.song.focus();
+}
+$("#dd-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target, out = {};
+  for (const k of ["song", "artist", "album", "genre", "tuning", "capo", "tempo", "guitar"]) out[k] = f[k].value;
+  const info = await api().set_details(ddSong, out);
+  $("#details-dialog").hidden = true;
+  ddDone?.(info);
+  refreshLibrary();
+});
+$("#dd-cancel").onclick = () => ($("#details-dialog").hidden = true);
+
+// ---- backing track: choose a file or find one on YouTube -----------------------------------
+let btSong = null, btDone = null;
+function backingDialog(sid, name, done) {
+  btSong = sid;
+  btDone = done;
+  const it = state.library.find((x) => x.song === sid);
+  $("#bt-title").textContent = `Backing track for “${name}”`;
+  $("#bt-now").textContent = it?.backing ? "This song has a backing track. Picking another one replaces it." : "Play along with the song itself. Find one on YouTube, or use an audio file you have.";
+  $("#bt-remove").hidden = !it?.backing;
+  $("#bt-results").innerHTML = "";
+  $("#bt-hint").textContent = "";
+  $("#bt-dialog").hidden = false;
+}
+async function backingChosen(r) {
+  if (!r) return;
+  if (r.error) return toast(r.error);
+  await refreshLibrary();
+  $("#bt-dialog").hidden = true;
+  toast("Backing track ready. Press play in the reader; if it's early or late, nudge the sync from the backing track button.");
+  btDone?.(r);
+}
+$("#bt-file").onclick = async () => backingChosen(await api().backing_pick(btSong));
+$("#bt-remove").onclick = async () => {
+  await api().backing_remove(btSong);
+  await refreshLibrary();
+  $("#bt-dialog").hidden = true;
+  btDone?.({ backing: null, src: null });
+};
+$("#bt-close").onclick = () => ($("#bt-dialog").hidden = true);
+$("#bt-search").onclick = async () => {
+  $("#bt-hint").textContent = "Searching…";
+  $("#bt-results").innerHTML = "";
+  const r = await api().backing_find(btSong);
+  if (r.error) return ($("#bt-hint").textContent = r.error);
+  $("#bt-hint").textContent = `Results for “${r.query}”, best match first.${state.settings.gemini_set ? " Gemini picked the top one." : ""} Click one to download its sound.`;
+  $("#bt-results").innerHTML = r.results.map((v, k) => `
+    <li>
+      <img src="${esc(v.thumb)}" alt="" loading="lazy">
+      <div>${k === 0 && v.score > 0 ? `<span class="best">${v.ai ? "Gemini's pick" : "Best match"}</span>` : ""}
+        <b>${esc(v.title)}</b><span>${esc(v.channel)} · ${clock(v.duration)}</span></div>
+      <button class="btn ghost small" data-bt="${esc(v.url)}">Use this</button>
+    </li>`).join("") || `<p class="empty">Nothing found.</p>`;
+};
+$("#bt-results").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-bt]");
+  if (!b) return;
+  $$("#bt-results button").forEach((x) => (x.disabled = true));
+  b.textContent = "Downloading…";
+  const r = await api().backing_get(btSong, b.dataset.bt);
+  $$("#bt-results button").forEach((x) => (x.disabled = false));
+  b.textContent = "Use this";
+  backingChosen(r);
 });
 
 // ---- review --------------------------------------------------------------------------------
@@ -761,8 +1070,13 @@ document.addEventListener("click", async (e) => {
     state.review = null;
     await refreshLibrary();
     show(["area", "review", "play"].includes(state.prev) ? "library" : state.prev);
+    renderLibrary();
   }
   if (act === "theme") toggleTheme();
+  if (act === "import-files" || act === "import-folder") {
+    const r = await api().import_dialog(act === "import-folder");
+    if (r?.job) toast("Importing in the background. Songs show up in your library as they're done.", [["Show queue", () => toggleQueue(true)]]);
+  }
 });
 
 $("#open-settings").onclick = () => {
@@ -786,7 +1100,10 @@ $("#pick-folder").onclick = async () => {
 };
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { $("#settings").hidden = true; $("#card-menu").hidden = true; toggleQueue(false); }
+  if (e.key === "Escape") {
+    for (const d of ["#settings", "#card-menu", "#details-dialog", "#bt-dialog"]) $(d).hidden = true;
+    toggleQueue(false);
+  }
   const typing = e.target.matches?.("input, select, textarea");
   if (!typing && (e.key === "d" || e.key === "D") && !e.ctrlKey && !e.metaKey) toggleTheme();
 });
@@ -796,6 +1113,7 @@ window.addEventListener("pywebviewready", async () => {
   await document.fonts.ready;
   await refreshLibrary();
   handlers.jobs(await api().jobs());
-  show("home");
-  $("#url").focus();
+  if (state.library.length) show("library");
+  else { show("add"); $("#url").focus(); }
+  window.gpScanPending?.();
 });

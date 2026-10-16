@@ -4,6 +4,8 @@ numpy>=2.0
 reportlab>=4.0
 pywebview>=6.0
 winocr>=0.0.15
+winrt-Windows.Data.Pdf>=3.2
+winrt-Windows.Storage>=3.2
 pillow>=10.0
 
 # building the exe
